@@ -4,28 +4,210 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IDEAL Loan Prototype</title>
+
   <style>
+    * { box-sizing: border-box; }
     body {
+      margin: 0;
       font-family: Arial, sans-serif;
-      background: #f5f6f8;
-      padding: 40px;
-      color: #222;
+      background: #f4f5f7;
+      color: #202632;
     }
-    main {
-      max-width: 700px;
-      margin: auto;
-      padding: 32px;
+    header {
+      background: #fff;
+      border-bottom: 4px solid #d71920;
+      padding: 24px;
+    }
+    main { max-width: 850px; margin: 32px auto; padding: 0 20px; }
+    .card {
       background: white;
-      border-radius: 12px;
+      padding: 28px;
+      border: 1px solid #e0e3e8;
+      border-radius: 14px;
+      margin-bottom: 24px;
     }
+    h1 { margin: 10px 0; }
+    h2 { margin-top: 0; }
+    p { line-height: 1.6; }
+    .muted { color: #626b79; font-size: 14px; }
+    label { display: block; font-weight: bold; margin-top: 20px; }
+    input, textarea {
+      width: 100%;
+      padding: 12px;
+      margin-top: 8px;
+      border: 1px solid #aeb5c0;
+      border-radius: 7px;
+      font: inherit;
+    }
+    button {
+      padding: 13px 20px;
+      margin-top: 20px;
+      border: none;
+      border-radius: 7px;
+      background: #c91820;
+      color: white;
+      font: inherit;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:hover { background: #a6141a; }
+    .badge {
+      display: inline-block;
+      background: #fff0d6;
+      color: #764500;
+      padding: 7px 11px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: bold;
+    }
+    [hidden] { display: none !important; }
   </style>
 </head>
+
 <body>
-  <main>
-    <p>Academic prototype • Not an official DBS service</p>
+  <header>
+    <p class="muted">Academic prototype • Not an official DBS service</p>
     <h1>Supply Chain Credit Intelligence</h1>
-    <p>Identify risks affecting your key suppliers and customers.</p>
-    <p>Your website is working. The interactive features come next.</p>
+    <p>Understand risks affecting your critical business relationships.</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. Declare a critical supplier</h2>
+      <p class="muted">
+        Use fictional information for this demonstration.
+        Entries are kept only while this page remains open.
+      </p>
+
+      <form id="supplierForm">
+        <label for="supplierName">Supplier company name</label>
+        <input id="supplierName"
+               placeholder="Example Components Ltd"
+               maxlength="120" required>
+
+        <label for="dependency">What do you depend on this supplier for?</label>
+        <textarea id="dependency" rows="3" maxlength="500"
+          placeholder="A critical component used in our production."
+          required></textarea>
+
+        <label for="inventory">How many weeks of inventory remain?</label>
+        <input id="inventory" type="number" min="0" max="104"
+               step="0.5" value="3" required>
+
+        <button type="submit">Save supplier declaration</button>
+      </form>
+
+      <p id="saveStatus" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="supplierCard" class="card" hidden>
+      <h2>2. Review the declared dependency</h2>
+      <p><strong>Supplier:</strong> <span id="savedName"></span></p>
+      <p><strong>Dependency:</strong> <span id="savedDependency"></span></p>
+      <p><strong>Inventory coverage:</strong> <span id="savedInventory"></span></p>
+
+      <button id="simulateButton" type="button">
+        Simulate a supplier disruption
+      </button>
+    </section>
+
+    <section id="alertCard" class="card" hidden>
+      <span class="badge">SIMULATED EVENT • REQUIRES REVIEW</span>
+      <h2 style="margin-top:20px">Possible supply interruption</h2>
+
+      <p id="eventDescription"></p>
+      <p class="muted">
+        Source: fictional demonstration announcement.
+        No live news search or AI analysis has been performed.
+      </p>
+
+      <h3>Why this could matter</h3>
+      <p id="impactDescription"></p>
+
+      <h3>What needs checking</h3>
+      <p>
+        Confirm whether the affected factory supplies your order,
+        whether deliveries will stop, and whether alternative
+        suppliers or inventory are available.
+      </p>
+
+      <h3>Possible lending implication</h3>
+      <p>
+        If operations or customer receipts are delayed, review the
+        cash flow assumptions supporting the loan. This alert alone
+        does not establish a repayment problem.
+      </p>
+
+      <button id="confirmButton" type="button">
+        Mark for relationship manager review
+      </button>
+      <p id="reviewStatus" role="status" aria-live="polite"></p>
+    </section>
   </main>
+
+  <script>
+    const byId = id => document.getElementById(id);
+    let supplier = null;
+
+    byId("supplierForm").addEventListener("submit", event => {
+      event.preventDefault();
+
+      const name = byId("supplierName").value.trim();
+      const dependency = byId("dependency").value.trim();
+      const inventory = Number(byId("inventory").value);
+
+      if (!name || !dependency) {
+        byId("saveStatus").textContent =
+          "Please enter a supplier name and describe the dependency.";
+        return;
+      }
+
+      supplier = { name, dependency, inventory };
+
+      byId("savedName").textContent = supplier.name;
+      byId("savedDependency").textContent = supplier.dependency;
+      byId("savedInventory").textContent = supplier.inventory + " weeks";
+
+      byId("supplierCard").hidden = false;
+      byId("alertCard").hidden = true;
+      byId("reviewStatus").textContent = "";
+      byId("saveStatus").textContent =
+        "Supplier declaration saved for this demonstration.";
+    });
+
+    byId("simulateButton").addEventListener("click", () => {
+      if (!supplier) return;
+
+      const closureWeeks = 6;
+      const uncoveredWeeks =
+        Math.max(0, closureWeeks - supplier.inventory);
+
+      byId("eventDescription").textContent =
+        "Hypothetical scenario: " + supplier.name +
+        " announces a six-week closure at the factory supplying you.";
+
+      byId("impactDescription").textContent =
+        uncoveredWeeks > 0
+          ? "You declared " + supplier.inventory +
+            " weeks of inventory. Assuming deliveries stop immediately, " +
+            "usage remains unchanged and no replacement supply arrives, " +
+            "there could be " + uncoveredWeeks +
+            " weeks without supply after inventory runs out. " +
+            "The financial impact still needs assessment."
+          : "Your declared inventory could cover the six-week closure " +
+            "under unchanged usage. Confirm product suitability and " +
+            "delivery timing before concluding that operations are protected.";
+
+      byId("reviewStatus").textContent = "";
+      byId("alertCard").hidden = false;
+      byId("alertCard").scrollIntoView({ behavior: "smooth" });
+    });
+
+    byId("confirmButton").addEventListener("click", () => {
+      byId("reviewStatus").textContent =
+        "Marked for review in this demonstration. " +
+        "No information has been sent to DBS.";
+    });
+  </script>
 </body>
 </html>
