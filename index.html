@@ -492,7 +492,7 @@ const PROFILE_KEYS=['name','country','industry','location','lat','lon','location
 const APP_KEYS=['purpose','growth','currency','project','contingency','workingCapital','equityFunding','availableFacility','facilityConfirmed','requested','bufferReason','amountReason','collateral'];
 const PRODUCTS=['Amortising term loan','Equal principal term loan','Revolving / bullet facility'];
 let addCompanyOpen=false,DB,activeLoanId='',profileId='',profileTab='details',caseTab='overview',reviewTab='financials',listSearch='',listStatus='All stages',regionFilter='All regions',inboxFilter='All priorities',lastImportCompany='',aiBusy=false,scanBusyId='',globeCleanup=null;
-const pick=(o,keys)=>Object.fromEntries(keys.map(k=>[k,o[k]??(k==='lat'||k==='lon'?null:'')]));
+const pick=(o,keys)=>Object.fromEntries(keys.map(k=>[k,o[k]===undefined?(k==='lat'||k==='lon'?null:''):o[k]]));
 const companyById=x=>DB.companies.find(c=>c.id===x);
 const loanById=x=>DB.loans.find(l=>l.id===x);
 const activeLoan=()=>loanById(activeLoanId);
@@ -525,7 +525,14 @@ function seedV3(old){const x=old||seedV2();const c1=baseCompany(x,'company-1');c
  const l6=baseLoan(b,c3.id,'LN-2026-012','Cold-chain capacity','Submitted');l6.application={...l6.application,project:1800000,equityFunding:300000,availableFacility:0,requested:1500000,purpose:'Expand cold-chain distribution capacity',growth:'Increase refrigerated storage and regional distribution capacity'};
  return {version:3,role:old?.role==='Analyst'?'Analyst':'Customer',customerId:c1.id,activeLoanId:l1.id,companies:[c1,c2,c3],loans:[l1,l2,l3,l4,l5,l6],connection:{url:old?.connection?.url||SERVICE_URL,ready:false,message:'',checkedAt:''},audit:(old?.audit||[]).map(a=>({...a,companyId:c1.id,loanId:l1.id})).slice(0,500),monitorEnabled:false,caseSequence:20};}
 function validatePortfolio(x){if(!x||x.version!==3||!Array.isArray(x.companies)||!x.companies.length||x.companies.length>100||!Array.isArray(x.loans)||x.loans.length>500)throw Error('Choose a valid portfolio workspace.');const ids=new Set();for(const c of x.companies){if(!/^[A-Za-z0-9_-]{1,100}$/.test(c.id)||ids.has(c.id)||!c.profile?.name||!Array.isArray(c.financials)||!c.financials.length||!Array.isArray(c.deps)||!Array.isArray(c.events))throw Error('Invalid company profile.');ids.add(c.id);for(const f of c.financials){if(!/^\d{4}$/.test(String(f.year)))throw Error('Invalid financial year.');for(const k of Object.keys(FIELDS))if(f[k]!==null&&!finite(f[k]))throw Error('Invalid financial figure.');}c.benchmarks=c.benchmarks||[];c.monitor={enabled:false,error:'',warning:'',lastRun:'',...c.monitor};for(const d of c.deps){if(!/^[A-Za-z0-9_-]{1,100}$/.test(d.id)||!d.name||!RELATIONSHIP_KINDS.includes(d.kind)||d.share!==null&&(!finite(d.share)||d.share<0||d.share>100))throw Error('Invalid relationship.');for(const [k,max]of [['lat',90],['lon',180]])if(d[k]!==null&&d[k]!==undefined&&(!finite(d[k])||Math.abs(d[k])>max))throw Error('Invalid relationship coordinates.');}}
- const lids=new Set();for(const l of x.loans){if(!/^[A-Za-z0-9_-]{1,100}$/.test(l.id)||lids.has(l.id)||!ids.has(l.companyId)||!l.application||!l.terms||!l.scenario||!l.cov||!STAGES.includes(l.status))throw Error('Invalid loan case.');lids.add(l.id);for(const k of ['project','requested','equityFunding','availableFacility','contingency','workingCapital'])if(!(isDisclosed(l)&&k!=='requested'&&l.application[k]===null)&&(!finite(l.application[k])||l.application[k]<0||l.application[k]>1e12))throw Error('Invalid loan amount.');
+ const lids=new Set();for(const l of x.loans){if(!/^[A-Za-z0-9_-]{1,100}$/.test(l.id)||lids.has(l.id)||!ids.has(l.companyId)||!l.application||!l.terms||!l.scenario||!l.cov||!STAGES.includes(l.status))throw Error('Invalid loan case.');lids.add(l.id);for(const k of ['project','requested','equityFunding','availableFacility','contingency','workingCapital']){
+   const amount=l.application[k];
+   if(isDisclosed(l)&&k!=='requested'&&(amount===null||amount==='')){
+     l.application[k]=null;
+     continue;
+   }
+   if(!finite(amount)||amount<0||amount>1e12)throw Error('Invalid loan amount.');
+ }
  if(isDisclosed(l)){
    if(!safeURL(l.disclosure.url)||!finite(l.disclosure.amount)||l.disclosure.amount<=0||l.disclosure.amount!==l.application.requested||!finite(l.disclosure.tenor)||l.disclosure.tenor<=0)throw Error('Invalid public facility disclosure.');
    l.terms={product:'Green term loan',years:l.disclosure.tenor,rate:null,grace:null,fee:null};
