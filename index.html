@@ -190,6 +190,8 @@ details.clean-collapse[open]>summary::after{content:'Hide ▴'}
 .pov-card .pov-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#c8102e}
 .pov-card strong{font-size:14px;color:#0f172a}
 .pov-card span{font-size:12px;color:#475569;line-height:1.45;font-weight:400}
+.profile-summary div strong{display:block;margin-bottom:2px}
+.profile-summary div small{display:block;font-size:11.5px;color:#64748b;margin-top:2px;line-height:1.45}
 .tour-dock{position:fixed;bottom:20px;left:20px;top:auto;right:auto;z-index:155;width:368px;max-width:calc(100vw - 32px);background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-top:4px solid #c8102e;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.26);padding:16px 18px}
 .tour-dock-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
 .tour-step-badge{background:#fef2f2;color:#c8102e;border:1px solid #fecaca;font-size:10.5px;font-weight:800;padding:2px 9px;border-radius:999px;letter-spacing:.3px;text-transform:uppercase}
@@ -760,6 +762,627 @@ function realFinancialRows(companyLabel,sourceLabel,currency,asofSuffix,urlFn,pr
     return row;
   });
 }
+const TWC_RCF_ID='TWC-RCF-2026';
+const TWC_RCF_AS_OF='2026-11-23';
+const TWC_RCF_LIMIT=3_000_000;
+const TWC_RCF_ADVANCE_RATE=0.75;
+const TWC_RCF_SPREAD=1.50;
+const TWC_RCF_PROJECT_SOURCE='https://ir.tiongwoon.com/newsroom/20260224_172534_BQM_TDWPW1J1HDBPBR9K.1.pdf';
+const TWC_RCF_RATES={SGD:1,USD:1.34,CNY:0.191};
+const TWC_RCF_ENTITIES=[
+  ['tw-demo-usd-supplier','Rigging Supplier A','Supplier','China',31.23,121.47,'Imported rigging and project consumables, payable in USD'],
+  ['tw-demo-usd-customer','Regional EPC Contractor B','Customer','Malaysia',1.49,103.74,'USD progress payment for specialist lifting work'],
+  ['tw-demo-cny-supplier','Components Supplier C','Supplier','China',29.87,121.55,'Equipment components sold under a steel price adjustment clause'],
+  ['tw-demo-sg-customer','Singapore EPC Contractor D','Customer','Singapore',1.31,103.79,'Certified project invoices paid into the designated collection account']
+];
+const TWC_RCF_FLOWS=[
+  {id:'OPS-01',side:'pay',ccy:'SGD',amount:2_000_000,day:5,project:'Semiconductor & public infrastructure integrated heavy-lift',source:'Project cost schedule OPS-01 (Illustrative)',description:'Project crews, transport and equipment hire'},
+  {id:'OPS-02',side:'pay',ccy:'SGD',amount:1_500_000,day:12,project:'Public infrastructure heavy-lift mobilisation',source:'Project cost schedule OPS-02 (Illustrative)',description:'Subcontractor mobilisation and operating costs'},
+  {id:'RC-USD-01',side:'receive',ccy:'USD',amount:300_000,day:16,dep:'tw-demo-usd-customer',project:'Regional specialist heavy-lift subcontract',source:'Payment notice DEMO-EPC-01 (Illustrative)',description:'Regional EPC Contractor B progress receipt',cashCertain:true},
+  {id:'AP-USD-01',side:'pay',ccy:'USD',amount:500_000,day:25,dep:'tw-demo-usd-supplier',project:'Semiconductor & public infrastructure integrated heavy-lift',source:'Supplier invoice RIG-A-01 (Illustrative)',description:'Rigging Supplier A invoice'},
+  {id:'AR-SGD-01',side:'receive',ccy:'SGD',amount:2_200_000,day:28,dep:'tw-demo-sg-customer',project:'Semiconductor fab lifting package',source:'Certified invoice AR-SGD-01 (Illustrative)',description:'Certified semiconductor project invoice',creditInvoice:true,certificate:'CERT-SEM-01'},
+  {id:'AR-SGD-02',side:'receive',ccy:'SGD',amount:1_800_000,day:42,dep:'tw-demo-sg-customer',project:'Public infrastructure heavy-lift package',source:'Certified invoice AR-SGD-02 (Illustrative)',description:'Certified public infrastructure project invoice',creditInvoice:true,certificate:'CERT-INF-02'},
+  {id:'AP-USD-02',side:'pay',ccy:'USD',amount:200_000,day:49,dep:'tw-demo-usd-supplier',project:'Biopharmaceutical equipment installation',source:'Supplier invoice RIG-A-02 (Illustrative)',description:'Rigging Supplier A second invoice'},
+  {id:'AP-CNY-01',side:'pay',ccy:'CNY',amount:100_000,day:54,dep:'tw-demo-cny-supplier',project:'Biopharmaceutical equipment installation',source:'Illustrative purchase order COMP-01, clause 4.2',description:'Components Supplier C order'},
+  {id:'AR-SGD-03',side:'receive',ccy:'SGD',amount:800_000,day:76,dep:'tw-demo-sg-customer',project:'Biopharmaceutical equipment installation',source:'Progress billing AR-SGD-03 (Illustrative)',description:'Expected biopharmaceutical project receipt',creditInvoice:true,certificate:null}
+];
+const TWC_RCF_HEDGES=[{id:'FX-USD-01',invoice:'AP-USD-01',ccy:'USD',day:25,amount:100_000,rate:1.35}];
+const TWC_RCF_EVENT={
+  id:'tw-demo-receipt-delay',dep:'tw-demo-usd-customer',invoice:'RC-USD-01',payment:'AP-USD-01',extraDays:20,
+  project:'Regional specialist heavy-lift subcontract',
+  source:'Payment notice DEMO-EPC-01 (Illustrative)',
+  title:'Regional EPC contractor delays progress payment',
+  evidence:'Payment notice DEMO-EPC-01 reschedules progress receipt RC-USD-01 by 20 calendar days.'
+};
+const TWC_RCF_PRICING={
+  invoice:'AP-CNY-01',document:'Illustrative purchase order COMP-01, clause 4.2',
+  clause:'At reset, 25% of the CNY invoice is indexed to the USD steel benchmark and converted at the prevailing USD/CNY rate. The remaining 75% is fixed in CNY.'
+};
+
+function isTiongWoonRcf(loan){
+  return loan?.id===TWC_RCF_ID&&loan.companyId==='tiongwoon';
+}
+
+function twcRcfState(loan){
+  const raw=loan?.rcfDemo||{};
+  const number=(value,fallback,min,max)=>typeof value==='number'&&Number.isFinite(value)
+    ?Math.min(max,Math.max(min,value))
+    :fallback;
+  const cleanScan=(s)=>s&&typeof s==='object'?{
+    engine:String(s.engine||'Rule-based demo (AI service unavailable)').slice(0,120),
+    note:String(s.note||'').slice(0,1000),
+    excerpt:String(s.excerpt||'').slice(0,400),
+    scannedAt:String(s.scannedAt||'').slice(0,60),
+    validated:s.validated===true
+  }:null;
+  return{
+    availableCash:number(raw.availableCash,750_000,0,100_000_000),
+    existingHeadroom:number(raw.existingHeadroom,350_000,0,100_000_000),
+    outstanding:number(raw.outstanding,2_400_000,0,TWC_RCF_LIMIT),
+    sora:number(raw.sora,1.75,0,15),
+    fxCurrency:['USD','CNY'].includes(raw.fxCurrency)?raw.fxCurrency:'USD',
+    fxShock:number(raw.fxShock,0,-50,50),
+    steelShock:number(raw.steelShock,0,-50,100),
+    priorAssignment:raw.priorAssignment===true,
+    receiptDelay:raw.receiptDelay===true,
+    clauseReviewed:raw.clauseReviewed===true,
+    clauseText:typeof raw.clauseText==='string'?raw.clauseText.slice(0,2500):TWC_RCF_PRICING.clause,
+    focusInvoice:TWC_RCF_FLOWS.some(flow=>flow.id===raw.focusInvoice)?raw.focusInvoice:'',
+    clauseScan:cleanScan(raw.clauseScan),
+    eventScan:cleanScan(raw.eventScan)
+  };
+}
+
+function addTiongWoonRcfRelationships(company){
+  for(const [id,name,kind,country,lat,lon,item] of TWC_RCF_ENTITIES){
+    if(company.deps.some(dep=>dep.id===id))continue;
+    company.deps.push({id,name,alias:name,kind,country,lat,lon,site:'Illustrative operating location',
+      item,share:null,inventory:null,alternatives:'',terms:null,confirmed:true,bankReviewed:false,
+      publicSource:false,url:'',locationPrecision:'Illustrative counterparty',rcfDemo:true});
+  }
+}
+
+function makeTiongWoonRcf(base,company){
+  const loan=baseLoan(base,company.id,TWC_RCF_ID,'Project Receivables Revolving Credit Line','Under assessment');
+  loan.region='Asia Pacific';
+  loan.owner='DBS Institutional Banking · Infrastructure & Industrials';
+  loan.makerPreparedBy='Kelvin Soh · Finance Manager';
+  loan.application={
+    purpose:'Bridge temporary cash gaps on eligible integrated heavy-lift projects until certified customer invoices are paid.',
+    growth:'Deliver more integrated lifting and engineering packages for semiconductor, public infrastructure and biopharmaceutical projects.',
+    currency:'SGD',requested:TWC_RCF_LIMIT,project:0,contingency:0,workingCapital:0,
+    equityFunding:0,availableFacility:0,facilityConfirmed:false,bufferReason:'',
+    amountReason:'Proposed S$3m ceiling based on February 2026 >S$40m project context, subject to verified incremental funding gap and eligible receivables.',
+    collateral:'Assignment of eligible, unpaid, certified and undisputed invoices from approved projects. Customer collections route to a designated DBS collection account to repay drawings.'
+  };
+  loan.terms={product:'Revolving / bullet facility',years:1,rate:3.25,grace:0,fee:0};
+  loan.cov={...loan.cov,confirmed:false};
+  loan.scenario={...loan.scenario,openingCash:750_000};
+  loan.message='Illustrative proposal under assessment. Verify remaining project cash flows, available funding and assignable invoices.';
+  loan.statusHistory=[{status:'Under assessment',time:TWC_RCF_AS_OF+'T08:30:00+08:00',message:loan.message}];
+  loan.rcfDemo=twcRcfState(loan);
+  return loan;
+}
+
+function migrateTiongWoonRcf(portfolio){
+  const company=portfolio.companies.find(row=>row.id==='tiongwoon');
+  if(!company)return portfolio;
+  const legacy=portfolio.loans.find(loan=>loan.id==='TWC-DBS-2026'&&loan.companyId===company.id);
+  if(!legacy&&!portfolio.loans.some(isTiongWoonRcf))return portfolio;
+  addTiongWoonRcfRelationships(company);
+  company.events=(company.events||[]).filter(e=>e.id!=='twc-mom-delay');
+  if(!company.events.some(e=>e.id==='twc-project-announcement-2026')){
+    company.events.unshift({
+      id:'twc-project-announcement-2026',dep:'',date:'2026-02-24',
+      title:'Tiong Woon announces ongoing and new projects with an estimated combined value above S$40m',
+      text:'The projects span semiconductor, public infrastructure and biopharmaceutical work. Individual billing schedules and remaining contract balances require confirmation.',
+      source:'Tiong Woon media release',url:TWC_RCF_PROJECT_SOURCE,type:'Corporate action',
+      status:'Relevant',priority:'Review',engine:'Public announcement',confirmedWeeks:null,note:'',
+      missing:'Obtain remaining project cash flows and verify debtor and invoice eligibility.'
+    });
+  }
+  let rcfLoan=portfolio.loans.find(isTiongWoonRcf);
+  if(!rcfLoan&&portfolio.loans.length<500){
+    rcfLoan=makeTiongWoonRcf(seedV2(),company);
+    portfolio.loans.unshift(rcfLoan);
+  }
+  if(rcfLoan)rcfLoan.rcfDemo=twcRcfState(rcfLoan);
+  if(legacy&&rcfLoan){
+    legacy.replacedTiongWoonDemo=true;
+    if(portfolio.activeLoanId===legacy.id)portfolio.activeLoanId=TWC_RCF_ID;
+  }
+  if(!Array.isArray(portfolio.countrySignals))portfolio.countrySignals=[];
+  if(!portfolio.countrySignals.some(e=>e.id==='twc-my-country-watch')){
+    portfolio.countrySignals.unshift({
+      id:'twc-my-country-watch',country:'Malaysia',date:daysAgo(2),
+      title:'Malaysia industrial transport & customs clearance advisory (Country-only match)',
+      text:'Country-level logistics watch for Malaysia. Kept in review state separately from transaction-linked receipt RC-USD-01 until site or invoice impact is verified.',
+      source:'Regional Logistics Watch (Illustrative)',url:TWC_RCF_PROJECT_SOURCE,status:'New',priority:'Review'
+    });
+  }
+  if(!Array.isArray(portfolio.countryWatchlist)||!portfolio.countryWatchlist.length){
+    portfolio.countryWatchlist=['Singapore','Malaysia','China','Germany','Saudi Arabia','India','Thailand','United Kingdom','Australia'];
+  }
+  return portfolio;
+}
+
+function twcRcfPricingLink(text=TWC_RCF_PRICING.clause){
+  const match=String(text||'').match(/\b(\d{1,3})%\s+of\s+the\s+(CNY)\s+(?:invoice|payable)\s+is\s+(?:indexed|linked)\s+to\s+(?:the\s+|a\s+)?(USD)\s+steel\s+benchmark\b/i);
+  if(!match||!/\bUSD\/CNY(?:\s+rate)?\b/i.test(text))return null;
+  const share=Number(match[1])/100;
+  return share>0&&share<=1?{share,invoiceCcy:match[2].toUpperCase(),benchmarkCcy:match[3].toUpperCase(),excerpt:String(text).trim().slice(0,260)}:null;
+}
+
+function twcRcfFlows(state,withScenario){
+  const rates={...TWC_RCF_RATES};
+  if(withScenario)rates[state.fxCurrency]*=1+state.fxShock/100;
+  const flows=TWC_RCF_FLOWS.map(row=>({...row,originalDay:row.day,originalAmount:row.amount,entity:'Tiong Woon demo borrower'}));
+  const pricing=twcRcfPricingLink(state.clauseText);
+  for(const flow of flows){
+    flow.spot=rates[flow.ccy];
+    if(withScenario&&state.receiptDelay&&flow.id===TWC_RCF_EVENT.invoice){
+      flow.day+=TWC_RCF_EVENT.extraDays;
+    }
+    if(withScenario&&state.clauseReviewed&&pricing&&flow.id===TWC_RCF_PRICING.invoice){
+      const baseCross=TWC_RCF_RATES[pricing.benchmarkCcy]/TWC_RCF_RATES[pricing.invoiceCcy];
+      const stressCross=rates[pricing.benchmarkCcy]/rates[pricing.invoiceCcy];
+      flow.amount*=(1-pricing.share)+pricing.share*(1+state.steelShock/100)*stressCross/baseCross;
+      flow.amount=Math.round(flow.amount*100)/100;
+    }
+  }
+  return flows.sort((a,b)=>a.day-b.day);
+}
+
+function twcRcfNetting(flows,hedges=TWC_RCF_HEDGES){
+  const table=[];
+  for(const ccy of ['USD','CNY']){
+    const payments=flows.filter(flow=>flow.ccy===ccy&&flow.side==='pay').sort((a,b)=>a.day-b.day);
+    const receipts=flows.filter(flow=>flow.ccy===ccy&&flow.side==='receive')
+      .map(flow=>({...flow,remaining:flow.amount})).sort((a,b)=>a.day-b.day);
+    for(const payment of payments){
+      const existing=hedges.find(hedge=>hedge.invoice===payment.id&&hedge.ccy===ccy&&hedge.day===payment.day);
+      const hedge=Math.min(payment.amount,existing?.amount||0);
+      let residual=payment.amount-hedge;
+      let matched=0;
+      const allocations=[];
+      for(const receipt of receipts){
+        if(!receipt.cashCertain||receipt.entity!==payment.entity||receipt.day>payment.day||residual===0)continue;
+        const take=Math.min(receipt.remaining,residual);
+        if(!take)continue;
+        receipt.remaining-=take;
+        residual-=take;
+        matched+=take;
+        allocations.push({id:receipt.id,take});
+      }
+      table.push({...payment,hedge,matched,residual,allocations});
+    }
+    table.push(...receipts);
+  }
+  return table;
+}
+
+function twcRcfPeak(state,flows){
+  let balance=state.availableCash+state.existingHeadroom;
+  let peak=0;
+  const entries=[];
+  for(const day of [...new Set(flows.map(flow=>flow.day))]){
+    const due=flows.filter(flow=>flow.day===day);
+    const row={day,inflow:0,outflow:0};
+    for(const flow of due){
+      const pledgedElsewhere=state.priorAssignment&&flow.id==='AR-SGD-02';
+      const hedge=TWC_RCF_HEDGES.find(h=>h.invoice===flow.id&&h.ccy===flow.ccy&&h.day===flow.day);
+      const value=flow.amount*flow.spot+(hedge?Math.min(flow.amount,hedge.amount)*(hedge.rate-flow.spot):0);
+      if(flow.side==='pay')row.outflow+=value;
+      if(flow.side==='receive'&&!pledgedElsewhere)row.inflow+=value;
+    }
+    balance+=row.inflow-row.outflow;
+    peak=Math.max(peak,-balance);
+    entries.push({...row,balance,reference:due.map(flow=>flow.id).join(', '),summary:due.map(flow=>flow.description).join('; ')});
+  }
+  return{peak:Math.round(peak),entries};
+}
+
+function twcRcfMetrics(state){
+  const eligible=TWC_RCF_FLOWS.filter(flow=>flow.creditInvoice&&flow.certificate&&
+    !(state.priorAssignment&&flow.id==='AR-SGD-02'));
+  const eligibleTotal=eligible.reduce((total,flow)=>total+flow.amount,0);
+  const borrowingBase=eligibleTotal*TWC_RCF_ADVANCE_RATE;
+  const securityLimit=Math.min(TWC_RCF_LIMIT,borrowingBase);
+  const baseline=twcRcfPeak(state,twcRcfFlows(state,false));
+  const scenarioFlows=twcRcfFlows(state,true);
+  const stress=twcRcfPeak(state,scenarioFlows);
+  const supportable=Math.min(securityLimit,baseline.peak);
+  const excess=Math.max(0,state.outstanding-securityLimit);
+  return{eligible,eligibleTotal,borrowingBase,securityLimit,baseline,stress,scenarioFlows,supportable,
+    portfolioHeadroom:Math.max(0,securityLimit-state.outstanding),
+    excess,replacementNeeded:excess>0?Math.ceil(excess/TWC_RCF_ADVANCE_RATE):0};
+}
+
+function twcRcfDate(day){
+  const date=new Date(TWC_RCF_AS_OF+'T00:00:00Z');
+  date.setUTCDate(date.getUTCDate()+day);
+  return date.toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'});
+}
+
+function twcRcfSgd(value){
+  return new Intl.NumberFormat('en-SG',{style:'currency',currency:'SGD',currencyDisplay:'narrowSymbol',maximumFractionDigits:0})
+    .format(value).replace(/(^-?)\$/,'$1S$');
+}
+
+function twcRcfCcy(amount,currency){
+  return currency+' '+new Intl.NumberFormat('en-SG',{maximumFractionDigits:2}).format(amount);
+}
+
+function twcRcfPct(num,den){
+  if(!den||!Number.isFinite(num)||!Number.isFinite(den))return '0.0%';
+  return ((num/den)*100).toFixed(1)+'%';
+}
+
+function twcRcfBandLabel(day){
+  return day<=30?'0–30 days':day<=60?'31–60 days':'61–90 days';
+}
+
+function twcRcfExposureBuckets(net){
+  const bands=[[0,30],[31,60],[61,90]];
+  return ['USD','CNY'].flatMap(ccy=>bands.map(([start,end])=>{
+    const rows=net.filter(row=>row.ccy===ccy&&row.day>=start&&row.day<=end);
+    const totals={ccy,label:start+'–'+end+' days',payable:0,receivable:0,sameCcy:0,hedge:0,residual:0};
+    for(const row of rows){
+      if(row.side==='receive')totals.receivable+=row.amount;
+      else{
+        totals.payable+=row.amount;
+        totals.sameCcy+=row.matched;
+        totals.hedge+=row.hedge;
+        totals.residual+=row.residual;
+      }
+    }
+    return totals;
+  }));
+}
+
+function twcRcfCurrencySummary(net,ccy){
+  const rows=net.filter(row=>row.ccy===ccy);
+  const summary={ccy,payable:0,receivable:0,sameCcy:0,hedge:0,residual:0,unallocated:0};
+  for(const row of rows){
+    if(row.side==='receive'){
+      summary.receivable+=row.amount;
+      summary.unallocated+=row.remaining||0;
+    }else{
+      summary.payable+=row.amount;
+      summary.sameCcy+=row.matched;
+      summary.hedge+=row.hedge;
+      summary.residual+=row.residual;
+    }
+  }
+  summary.netContractual=summary.payable-summary.receivable;
+  summary.covered=summary.sameCcy+summary.hedge;
+  return summary;
+}
+
+function twcRcfTreasuryOptions(state,net){
+  const summary=twcRcfCurrencySummary(net,state.fxCurrency);
+  const relevant=net.filter(item=>item.ccy===state.fxCurrency&&item.side==='pay'&&item.residual>0);
+  const spot=TWC_RCF_RATES[state.fxCurrency];
+  const referenceForward=spot*1.004;
+  const spotUnhedged=relevant.reduce((total,flow)=>total+flow.residual*flow.spot,0);
+  return [0,0.5,1].map(frac=>{
+    const additional=summary.residual*frac;
+    const cost=relevant.reduce((total,flow)=>total+flow.residual*(frac*referenceForward+(1-frac)*flow.spot),0);
+    return{
+      frac,
+      residual:summary.residual,
+      payable:summary.payable,
+      cover:additional,
+      coveredTotal:summary.covered+additional,
+      cost,
+      deltaVsSpot:cost-spotUnhedged
+    };
+  });
+}
+
+async function scanTwcRcfClause(loan,rawText){
+  const state=twcRcfState(loan);
+  state.clauseText=String(rawText||'').slice(0,2500).trim();
+  state.clauseReviewed=false;
+  const link=twcRcfPricingLink(state.clauseText);
+  const baseNote=link
+    ?`Validated ${link.invoiceCcy} payable (${(link.share*100).toFixed(0)}% indexed to ${link.benchmarkCcy} steel benchmark at ${link.benchmarkCcy}/${link.invoiceCcy}). Human confirmation required before applying.`
+    :'Incomplete or unsupported clause: requires explicit % share, CNY invoice currency, USD steel benchmark and USD/CNY rate basis. Original invoice amount kept unchanged.';
+  state.clauseScan={
+    engine:'Rule-based demo (AI service unavailable)',
+    note:baseNote,
+    excerpt:state.clauseText.slice(0,260),
+    scannedAt:new Date().toISOString(),
+    validated:!!link
+  };
+  try{
+    const res=await publicAPI('assess',{
+      counterparty:{id:'tw-demo-cny-supplier',name:'Components Supplier C',kind:'Supplier',dependency:'Supplier PO pricing clause COMP-01',country:'China'},
+      event:{title:'Pricing clause scan: '+TWC_RCF_PRICING.invoice,excerpt:state.clauseText,source:TWC_RCF_PRICING.document,url:TWC_RCF_PROJECT_SOURCE,date:TWC_RCF_AS_OF}
+    });
+    const aiText=String(res?.assessment?.explanation||'').trim();
+    state.clauseScan.engine='AI (Cloudflare Workers AI)';
+    if(aiText&&link)state.clauseScan.note=aiText.slice(0,320)+' (Validated '+Math.round(link.share*100)+'% '+link.benchmarkCcy+'/'+link.invoiceCcy+' clause · Human review required.)';
+  }catch{
+    state.clauseScan.engine='Rule-based demo (AI service unavailable)';
+  }
+  loan.rcfDemo=twcRcfState({rcfDemo:state});
+  audit((state.clauseScan.engine.startsWith('AI')?'AI':'Rule-based')+' pricing clause scan on '+loan.id+': '+(link?'matched '+Math.round(link.share*100)+'% USD/CNY basis (pending human review)':'unverified — original CNY 100,000 kept'));
+  persist();
+  render();
+  toast(link?'Clause extracted — confirm human review below to include in scenario.':'Unsupported clause — invoice amount remains unchanged.');
+}
+
+async function assessTwcRcfEvent(loan){
+  const state=twcRcfState(loan);
+  state.eventScan={
+    engine:'Rule-based demo (AI service unavailable)',
+    note:'Matched Regional EPC Contractor B (Malaysia) progress receipt RC-USD-01 (USD 300,000) delayed by 20 calendar days onto AP-USD-01 window. Confirm delay toggle below to apply.',
+    excerpt:TWC_RCF_EVENT.evidence,
+    scannedAt:new Date().toISOString(),
+    validated:true
+  };
+  try{
+    const res=await publicAPI('assess',{
+      counterparty:{id:TWC_RCF_EVENT.dep,name:'Regional EPC Contractor B',kind:'Customer',dependency:'USD progress receipt RC-USD-01',country:'Malaysia'},
+      event:{title:TWC_RCF_EVENT.title,excerpt:TWC_RCF_EVENT.evidence,source:TWC_RCF_EVENT.source,url:TWC_RCF_PROJECT_SOURCE,date:TWC_RCF_AS_OF}
+    });
+    const aiText=String(res?.assessment?.explanation||'').trim();
+    state.eventScan.engine='AI (Cloudflare Workers AI)';
+    if(aiText)state.eventScan.note=aiText.slice(0,320);
+  }catch{
+    state.eventScan.engine='Rule-based demo (AI service unavailable)';
+  }
+  loan.rcfDemo=twcRcfState({rcfDemo:state});
+  audit((state.eventScan.engine.startsWith('AI')?'AI':'Rule-based')+' event match on '+loan.id+' for RC-USD-01 (Regional EPC Contractor B)');
+  persist();
+  render();
+  toast('Event evidence interpreted. Apply or reverse the 20-day delay below.');
+}
+
+function twcRcfDecisionSummary(m){
+  if(m.baseline.peak===0&&m.stress.peak===0){
+    return{badge:'Additional financing unnecessary',tone:'green',
+      text:'Entered project cash and usable existing headroom cover every dated cash outflow (S$0 peak gap). Additional DBS financing is unnecessary under these assumptions.'};
+  }
+  if(m.baseline.peak===0&&m.stress.peak>0){
+    return{badge:'Baseline covered · Stress gap '+twcRcfSgd(m.stress.peak),tone:'amber',
+      text:'Entered resources cover the baseline schedule (S$0 gap), while active stress assumptions create a '+twcRcfSgd(m.stress.peak)+' temporary shortfall.'};
+  }
+  if(m.supportable===0){
+    return{badge:'Eligible collateral required',tone:'amber',
+      text:'The dated forecast shows a '+twcRcfSgd(m.baseline.peak)+' peak gap, but S$0 of eligible certified invoices are available to support a drawdown.'};
+  }
+  return{badge:'Support in principle · Up to '+twcRcfSgd(m.supportable),tone:'amber',
+    text:'Verified incremental baseline gap is '+twcRcfSgd(m.baseline.peak)+' within the S$3,000,000 ceiling and '+twcRcfSgd(m.borrowingBase)+' borrowing base (75% of '+twcRcfSgd(m.eligibleTotal)+' eligible invoices). Review after 12 months.'};
+}
+
+function twcRcfFacilityCard(loan){
+  const m=twcRcfMetrics(twcRcfState(loan)),dec=twcRcfDecisionSummary(m);
+  return statGrid([
+    ['Proposed ceiling',twcRcfSgd(TWC_RCF_LIMIT),'12 months availability · Review before renewal'],
+    ['Indicative pricing','3M SORA + 1.50% p.a.','Illustrative margin subject to credit approval'],
+    ['Recommended limit',twcRcfSgd(m.supportable),'Gap '+twcRcfSgd(m.baseline.peak)+' · Base '+twcRcfSgd(m.borrowingBase)],
+    ['Credit status',dec.badge,'Assigned invoices repaid via DBS account']
+  ])+`<section class="card"><div class="row between"><h2>Working capital for integrated heavy-lift projects</h2>${tag(dec.badge,dec.tone)}</div>
+    <p>${E(loan.application.growth)} The secured SGD revolving working capital line bridges project expenses until certified customer invoices are collected.</p>
+    <p><strong>Project context (Feb 2026 announcement).</strong> Tiong Woon announced over S$40m of ongoing and new project work across semiconductor, public infrastructure and biopharmaceutical sectors. The forecast uses illustrative remaining project cash flows as at ${twcRcfDate(0)}.</p>
+    ${sourceLink(TWC_RCF_PROJECT_SOURCE,'Tiong Woon Feb 2026 project announcement (>S$40m) ↗')}
+    <p style="margin-top:10px"><strong>Security, advance rate &amp; repayment.</strong> Only unpaid, certified, undisputed invoices from approved projects available for assignment qualify (75% borrowing base). Assigned customer receipts route into a designated DBS collection account to repay outstanding drawings. Prior-assigned invoices are excluded.</p>
+    <p class="tiny muted">Classroom credit proposal matching Part 1 analysis. Project invoices, transaction amounts, demo FX rates and disruption notices are illustrative.</p>
+    <div class="row">${button('Check Drawdown Eligibility','caseTab:tranches',true)}${button('Open Cash Stress','caseTab:planner')}${button('Open FX Hedge','caseTab:fx')}${button('Credit Review','caseTab:review')}</div>
+  </section>`;
+}
+
+function twcRcfDrawdownCard(loan){
+  const state=twcRcfState(loan),m=twcRcfMetrics(state);
+  const notice=m.excess>0
+    ?`Pause new drawings: outstanding ${twcRcfSgd(state.outstanding)} exceeds the revised borrowing limit (${twcRcfSgd(m.securityLimit)}) by ${twcRcfSgd(m.excess)}. Repay ${twcRcfSgd(m.excess)} OR pledge at least ${twcRcfSgd(m.replacementNeeded)} of replacement eligible invoices.`
+    :`Within borrowing limit: ${twcRcfSgd(m.eligibleTotal)} eligible invoices support a 75% borrowing base of ${twcRcfSgd(m.borrowingBase)}. Customer collections pay into the designated DBS collection account to retire drawings.`;
+  return `<section class="card" id="twcBorrowingBase"><div class="row between"><h2>Receivables eligibility &amp; borrowing base check</h2>${tag('75% ARIF Advance Rate','neutral')}</div>
+    <p>Count only unpaid, certified, undisputed invoices from approved projects available for assignment. Full S$3,000,000 facility draws require at least S$4,000,000 in eligible invoices.</p>
+    ${statGrid([
+      ['Eligible invoices',twcRcfSgd(m.eligibleTotal),m.eligible.length+' certified & assignable'],
+      ['Borrowing base (75%)',twcRcfSgd(m.borrowingBase),'75% advance rate (capped at S$3m)'],
+      ['Remaining capacity',twcRcfSgd(m.portfolioHeadroom),'After '+twcRcfSgd(state.outstanding)+' drawn'],
+      ['Excess to repay / cure',twcRcfSgd(m.excess),m.excess?'Repay or replace '+twcRcfSgd(m.replacementNeeded):'Within borrowing limit']
+    ])}
+    <div class="tablewrap"><table><thead><tr><th>Invoice &amp; approved project</th><th>Due date</th><th>Amount</th><th>Eligibility criteria</th><th>Repayment route</th></tr></thead><tbody>
+    ${TWC_RCF_FLOWS.filter(flow=>flow.creditInvoice).map(flow=>{
+      const ok=m.eligible.includes(flow);
+      const st=ok?tag(flow.certificate+' · Unpaid, Certified & Assignable','green')
+        :tag(flow.certificate?'Excluded · Assigned to another lender':'Excluded · Awaiting certification','amber');
+      return `<tr><td><strong>${E(flow.id)}</strong> · ${E(flow.project)}<br><small>${E(flow.description)}</small></td><td>${twcRcfDate(flow.day)}</td><td>${twcRcfSgd(flow.amount)}</td><td>${st}</td><td>${ok?'Designated DBS collection account':'Not eligible for draw'}</td></tr>`;
+    }).join('')}
+    </tbody></table></div>
+    <form id="twcRcfDrawForm" class="forms" style="margin-top:14px">
+      ${field('Illustrative drawings outstanding · SGD','outstanding',state.outstanding,'number','required min="0" max="3000000" step="1"')}
+      <div><button class="primary">Update drawing balance</button></div>
+    </form>
+    <div class="row" style="margin-top:12px">${button(state.priorAssignment?'Clear prior assignment scenario':'Simulate prior assignment (AR-SGD-02)','twcRcfAssignment',true)}${button('Open Cash Stress','caseTab:planner')}</div>
+    <p class="notice ${m.excess?'':'subtle'}">${E(notice)}</p>
+  </section>`;
+}
+
+function twcRcfCashCard(loan){
+  const state=twcRcfState(loan),m=twcRcfMetrics(state),dec=twcRcfDecisionSummary(m);
+  const shortage=Math.max(0,m.stress.peak-m.securityLimit);
+  const activeEffects=[
+    state.receiptDelay?'USD 300k receipt RC-USD-01 delayed +20d':'',
+    state.fxShock!==0?`${state.fxCurrency} spot ${state.fxShock>0?'+':''}${state.fxShock}%`:'',
+    state.clauseReviewed&&state.steelShock!==0?`Confirmed steel clause ${state.steelShock>0?'+':''}${state.steelShock}%`:''
+  ].filter(Boolean);
+  return `<section class="card" id="twcCashForecast"><div class="row between"><h2>Dated project cash forecast &amp; sizing</h2>${tag('Illustrative demo assumptions','neutral')}</div>
+    <p>Remaining project payments and collections as at ${twcRcfDate(0)} (>S$40m multi-sector project context). Forecast uses entered project cash and existing facility headroom before measuring the peak funding gap for the proposed S$3m DBS line.</p>
+    <form id="twcRcfCashForm" class="forms">
+      ${field('Available cash allocated to projects · SGD','availableCash',state.availableCash,'number','required min="0" max="100000000" step="1"')}
+      ${field('Usable headroom on existing facilities · SGD','existingHeadroom',state.existingHeadroom,'number','required min="0" max="100000000" step="1"')}
+      ${field('Illustrative 3M Compounded SORA · % p.a.','sora',state.sora,'number','required min="0" max="15" step="0.01"')}
+      <div><button class="primary">Recalculate funding gap</button></div>
+    </form>
+    ${statGrid([
+      ['Baseline peak gap',twcRcfSgd(m.baseline.peak),'Before proposed DBS line'],
+      ['Scenario peak gap',twcRcfSgd(m.stress.peak),activeEffects.join(' · ')||'Matches baseline'],
+      ['Recommended limit',twcRcfSgd(m.supportable),'Min(need, S$3m cap, 75% base)'],
+      ['Gap above collateral cap',twcRcfSgd(shortage),'Uncovered above '+twcRcfSgd(m.securityLimit)]
+    ])}
+    <div id="twcCashDecision" class="mc-bar" style="margin:12px 0;border-left-color:${dec.tone==='green'?'#167451':'#8d5909'}">
+      <div><strong>${E(dec.badge)}</strong><p class="tiny muted" style="margin:3px 0 0">${E(dec.text)}</p></div>
+      <div class="row">${button('Check Receivables','caseTab:tranches')}</div>
+    </div>
+    <p class="small">Indicative facility pricing: <strong>${(state.sora+TWC_RCF_SPREAD).toFixed(2)}% p.a.</strong> (3M Compounded SORA ${state.sora.toFixed(2)}% + 1.50% spread). Reported group cash and bank deposits were S$86.6m at 30 June 2026 — verify unrestricted project availability before setting the final limit.</p>
+    <div class="tablewrap"><table><thead><tr><th>Date</th><th>Reference &amp; project flow</th><th>Cash in</th><th>Cash out</th><th>Net cash before DBS line</th></tr></thead><tbody>
+    ${m.stress.entries.map(row=>`<tr><td>${twcRcfDate(row.day)}</td><td><strong>${E(row.reference)}</strong><br><small>${E(row.summary)}</small></td><td>${twcRcfSgd(row.inflow)}</td><td>${twcRcfSgd(row.outflow)}</td><td><strong>${twcRcfSgd(row.balance)}</strong></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="row" style="margin-top:12px">${button('Review FX & Delay Scenario','caseTab:fx')}${button('Credit Review','caseTab:review')}</div>
+  </section>`;
+}
+
+function twcRcfFxCard(loan){
+  const state=twcRcfState(loan),m=twcRcfMetrics(state),net=twcRcfNetting(m.scenarioFlows);
+  const receipt=net.find(flow=>flow.id===TWC_RCF_EVENT.invoice);
+  const firstPayment=net.find(flow=>flow.id==='AP-USD-01');
+  const indirect=net.find(flow=>flow.id===TWC_RCF_PRICING.invoice);
+  const link=twcRcfPricingLink(state.clauseText);
+  const baselineNet=twcRcfNetting(twcRcfFlows(state,false));
+  const firstBase=baselineNet.find(flow=>flow.id===firstPayment.id);
+  const delayOnlyPeak=twcRcfPeak(state,twcRcfFlows({...state,fxShock:0,steelShock:0},true));
+  const focus=net.find(flow=>flow.id===state.focusInvoice);
+  const usdSum=twcRcfCurrencySummary(net,'USD');
+  const cnySum=twcRcfCurrencySummary(net,'CNY');
+  const selSum=state.fxCurrency==='CNY'?cnySum:usdSum;
+  const options=twcRcfTreasuryOptions(state,net);
+  const renderBucketRows=(ccy,sum)=>twcRcfExposureBuckets(net).filter(r=>r.ccy===ccy).map(row=>{
+    const nc=row.payable-row.receivable;
+    return `<tr><td>${row.ccy}</td><td>${row.label}</td><td>${twcRcfCcy(row.payable,row.ccy)}</td><td>${twcRcfCcy(row.receivable,row.ccy)}</td><td>${nc?twcRcfCcy(Math.abs(nc),row.ccy)+' '+(nc>0?'payable':'receivable'):ccy+' 0'}</td><td>${twcRcfCcy(row.sameCcy,row.ccy)}</td><td>${twcRcfCcy(row.hedge,row.ccy)}</td><td><strong>${twcRcfCcy(row.residual,row.ccy)}</strong></td><td>${row.payable?twcRcfPct(row.sameCcy+row.hedge,row.payable):'—'}</td></tr>`;
+  }).join('')+`<tr style="background:#f8fafc;font-weight:700"><td>${ccy}</td><td>Total (0–90 days)</td><td>${twcRcfCcy(sum.payable,ccy)}</td><td>${twcRcfCcy(sum.receivable,ccy)}</td><td>${twcRcfCcy(Math.abs(sum.netContractual),ccy)} ${sum.netContractual>=0?'payable':'receivable'}</td><td>${twcRcfCcy(sum.sameCcy,ccy)}</td><td>${twcRcfCcy(sum.hedge,ccy)}</td><td>${twcRcfCcy(sum.residual,ccy)}</td><td>${twcRcfPct(sum.covered,sum.payable)}</td></tr>`;
+  return `<section class="card" id="twcEventFx"><div class="row between"><h2>Event to FX &amp; cash impact</h2>${tag(state.receiptDelay?'20-day delay applied':'On-time baseline','amber')}</div>
+    ${focus?`<p class="notice subtle">Opened from Map: <strong>${E(focus.id)}</strong> · ${E(focus.description)} (${E(focus.project||'')}) · ${twcRcfCcy(focus.amount,focus.ccy)} · Due ${twcRcfDate(focus.day)}.</p>`:''}
+    <h3>${E(TWC_RCF_EVENT.title)}</h3>
+    <p>${E(TWC_RCF_EVENT.evidence)} Country-only news stays in review on the Map; this notice links directly to a dated USD receipt expected to fund supplier payment <strong>AP-USD-01</strong>.</p>
+    <div class="profile-summary">
+      <div><span>Source &amp; project</span><strong>${E(TWC_RCF_EVENT.source)}</strong><small>${E(TWC_RCF_EVENT.project)}</small></div>
+      <div><span>Linked customer receipt</span><strong>${twcRcfCcy(receipt.amount,'USD')} · ${E(receipt.id)}</strong><small>Counterparty: Regional EPC Contractor B · Original ${twcRcfDate(16)} → Active ${twcRcfDate(receipt.day)}</small></div>
+      <div><span>Expected offset effect</span><strong>${twcRcfCcy(firstPayment.residual,'USD')} exposed on AP-USD-01</strong><small>Baseline ${twcRcfCcy(firstBase.residual,'USD')} after FX-USD-01 (USD 100k) &amp; RC-USD-01</small></div>
+      <div><span>SGD Cash Stress peak gap</span><strong>${twcRcfSgd(delayOnlyPeak.peak)}</strong><small>Baseline ${twcRcfSgd(m.baseline.peak)} · Timing shift only (${twcRcfSgd(delayOnlyPeak.peak-m.baseline.peak>=0?delayOnlyPeak.peak-m.baseline.peak:0)} delta at 0% FX)</small></div>
+    </div>
+    ${state.eventScan?`<div class="note-box" style="margin-top:10px"><div class="row between"><strong>Event evidence check</strong>${tag(state.eventScan.engine,'neutral')}</div><p class="tiny" style="margin:4px 0">${E(state.eventScan.note)}</p><p class="tiny muted" style="margin:0">Excerpt: “${E(state.eventScan.excerpt)}”</p></div>`:''}
+    <div class="row" style="margin-top:12px">${button(state.receiptDelay?'Reverse 20-day receipt delay':'Apply 20-day receipt delay','twcRcfDelay',true)}${button('Interpret event (AI / rule-based)','twcRcfAssessEvent')}${button('View in Cash Stress →','caseTab:planner')}</div>
+  </section>
+  <section class="card" id="twcFxBuckets"><div class="row between"><h2>FX exposure by currency &amp; maturity (0–90 days)</h2>${tag('USD net '+twcRcfCcy(usdSum.netContractual,'USD')+' payable','neutral')}</div>
+    <p>Deterministic matching: receipts offset payables only when currency, borrower entity access and payment timing (receipt date ≤ payment date) qualify. Each receipt and existing hedge (FX-USD-01) is used once.</p>
+    <div class="tablewrap"><table><thead><tr><th>Currency</th><th>Maturity</th><th>Gross payables</th><th>Gross receivables</th><th>Net contractual</th><th>Eligible natural offset</th><th>Existing hedge</th><th>Remaining exposure</th><th>Covered %</th></tr></thead><tbody>
+    ${renderBucketRows('USD',usdSum)}
+    ${renderBucketRows('CNY',cnySum)}
+    </tbody></table></div>
+    ${usdSum.unallocated?`<p class="tiny muted" style="margin-top:8px">Timing mismatch note: ${twcRcfCcy(usdSum.unallocated,'USD')} of delayed customer receipt (${E(receipt.id)} arriving ${twcRcfDate(receipt.day)}) remains unallocated after covering ${E('AP-USD-02')} (due ${twcRcfDate(49)}).</p>`:''}
+    <details style="margin-top:10px"><summary>View transaction-level invoices, receipts &amp; single-use allocations</summary>
+    <div class="tablewrap"><table><thead><tr><th>Ref &amp; band</th><th>Counterparty &amp; project</th><th>Due date</th><th>Amount</th><th>Allocation</th></tr></thead><tbody>
+    ${net.sort((a,b)=>a.day-b.day).map(row=>`<tr><td><strong>${E(row.id)}</strong><br><small>${twcRcfBandLabel(row.day)}</small></td><td>${E(row.description)} · ${row.side==='pay'?'Payable':'Receivable'}<br><small>${E(row.project||'')}</small></td><td>${twcRcfDate(row.day)}</td><td>${twcRcfCcy(row.amount,row.ccy)}</td><td>${row.side==='pay'?E([...(row.allocations.map(a=>a.id+' '+twcRcfCcy(a.take,row.ccy))),...(row.hedge?['FX-USD-01 '+twcRcfCcy(row.hedge,row.ccy)]:[])].join(' · ')||'Unhedged'):E(twcRcfCcy(row.remaining,row.ccy)+' remaining')}</td></tr>`).join('')}
+    </tbody></table></div></details>
+  </section>
+  <section class="card" id="twcIndirectFx"><div class="row between"><h2>Indirect FX exposure from pricing clause</h2>${tag(state.clauseReviewed?'Human confirmed':'Needs human review',state.clauseReviewed?'green':'amber')}</div>
+    <p><strong>${E(state.clauseText===TWC_RCF_PRICING.clause?TWC_RCF_PRICING.document:'Entered clause for '+TWC_RCF_PRICING.invoice)}</strong></p>
+    <form id="twcRcfClauseForm">${textarea('Supplier pricing clause text','clauseText',state.clauseText,'required maxlength="2500"')}
+      <div class="row"><button class="primary">Scan pricing clause</button>${button('Restore 25% steel clause','twcRcfResetClause')}</div></form>
+    <div class="profile-summary" style="margin-top:10px">
+      <div><span>Indexed share &amp; basis</span><strong>${link?(link.share*100).toFixed(0)+'% · '+link.benchmarkCcy+'/'+link.invoiceCcy:'Unsupported / unverified'}</strong><small>Invoice ${E(TWC_RCF_PRICING.invoice)} (Components Supplier C)</small></div>
+      <div><span>Currencies detected</span><strong>Invoice ${link?E(link.invoiceCcy):'CNY'} · Benchmark ${link?E(link.benchmarkCcy)+' steel':'Not verified'}</strong><small>Engine: ${E(state.clauseScan?.engine||'Rule-based clause parser')}</small></div>
+      <div><span>Active invoice amount</span><strong>${twcRcfCcy(indirect.amount,'CNY')}</strong><small>Original CNY 100,000 · Applied once into exposure &amp; cash tables</small></div>
+      <div><span>Human review gate</span><strong>${state.clauseReviewed?'Confirmed for scenario':link?'Pending confirmation':'Original kept (unverified)'}</strong><small>${link?'Click confirm to include commodity/cross-FX stress':'Unsupported clause leaves invoice at CNY 100,000'}</small></div>
+    </div>
+    ${state.clauseScan?.excerpt?`<p class="tiny muted" style="margin-top:8px"><strong>Supporting excerpt:</strong> “${E(state.clauseScan.excerpt)}”</p>`:''}
+    ${link?`<div class="row" style="margin-top:10px">${button(state.clauseReviewed?'Undo clause confirmation':'Confirm clause for scenario','twcRcfClause',true)}</div>`:`<p class="notice" style="margin-top:10px">Unsupported clause: could not verify an explicit %, CNY invoice currency, USD steel benchmark and USD/CNY rate. ${E(TWC_RCF_PRICING.invoice)} remains unchanged at CNY 100,000.</p>`}
+  </section>
+  <section class="card" id="twcFxCompare"><h2>Independent commodity vs. FX stress &amp; illustrative hedge comparison</h2>
+    <p>Reference demo rates: S$1.34/USD, S$0.191/CNY (illustrative forward proxy: spot + 0.40%). Stress FX and steel benchmark independently. Hedge coverage percentages are derived directly from the ${E(state.fxCurrency)} exposure table above (Total payables ${twcRcfCcy(selSum.payable,state.fxCurrency)}, Remaining unhedged ${twcRcfCcy(selSum.residual,state.fxCurrency)}).</p>
+    <form id="twcRcfFxForm" class="forms">
+      ${select('Currency against SGD','fxCurrency',['USD','CNY'],state.fxCurrency)}
+      ${field('FX shock · % (applied to selected currency)','fxShock',state.fxShock,'number','required min="-50" max="50" step="0.1"')}
+      ${field('USD steel benchmark shock · % (commodity only)','steelShock',state.steelShock,'number','required min="-50" max="100" step="0.1"')}
+      <div><button class="primary">Apply independent shocks</button></div>
+    </form>
+    <div class="row" style="margin:8px 0 12px"><span class="tiny muted">Quick FX shocks:</span>${[0,2,5,-3].map(s=>button((s>0?'+':'')+s+'% FX','twcRcfQuickFx:'+s,state.fxShock===s)).join('')}</div>
+    <div class="tablewrap"><table><thead><tr><th>Illustrative option (not a forecast)</th><th>Remaining exposure</th><th>Additional hedge</th><th>Total covered %</th><th>SGD cost on residual</th><th>Trade-off</th></tr></thead><tbody>
+      ${options.map(option=>`<tr><td><strong>${option.frac===0?'Monitor unhedged (0%)':option.frac===0.5?'Partial hedge (50% of residual)':'Full hedge (100% of residual)'}</strong></td><td>${twcRcfCcy(option.residual,state.fxCurrency)}</td><td>${twcRcfCcy(option.cover,state.fxCurrency)}</td><td>${twcRcfPct(option.coveredTotal,option.payable)}</td><td><strong>${twcRcfSgd(option.cost)}</strong></td><td class="tiny">${option.frac===0?'Full flexibility; exposed to spot moves':option.frac===0.5?'Balances rate certainty and flexibility':'Locks rate on residual; lower flexibility'}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="tiny muted">Illustrative comparisons only — does not predict future exchange rates. Confirm underlying commercial obligations and corporate FX policy before booking.</p>
+  </section>`;
+}
+
+function twcRcfCreditCard(loan,company){
+  const m=twcRcfMetrics(twcRcfState(loan)),dec=twcRcfDecisionSummary(m);
+  const comp=company||companyById(loan.companyId);
+  return `<section class="card"><div class="row between"><h2>Conditional credit recommendation · ${E(loan.id)}</h2>${tag(dec.badge,dec.tone)}</div>
+    <p>${E(dec.text)} Confirm unrestricted project liquidity, usable existing lines, certified eligible invoices and debtor collection schedules before final credit approval.</p>
+    <p><strong>Facility structure (aligned with Part 1 proposal).</strong> Secured SGD revolving working capital line up to S$3,000,000 for 12 months (review before renewal) at indicative 3M Compounded SORA + 1.50% p.a. Purpose: bridge timing gaps between project expenses and certified customer payments (~86 days DSO vs ~21 days DPO = ~65-day cash gap; FY2026 Note 14 net trade receivables S$44.294m vs trade payables S$6.341m) across semiconductor, public infrastructure and biopharmaceutical work (&gt;S$40m Feb 2026 project announcement).</p>
+    <p><strong>Repayment capacity &amp; financial anchors.</strong> FY2026 operating cash inflow S$67.5m, current ratio 1.48×, net gearing 9.5%, reported cash &amp; deposits S$86.6m. Customer receipts on assigned invoices pay directly into a designated DBS collection account to repay drawings.</p>
+    <p><strong>Documentation risk mitigation.</strong> Exclude any invoice previously assigned to another lender, recalculate the 75% borrowing base immediately, and require replacement eligible invoices or cash repayment of any excess above the revised limit.</p>
+    <p><strong>Operating risk note.</strong> Monitor debtor delays and subcontracted crane reliance (FY2026: 600+ cranes owned at 57% utilisation; ~S$12m cross-hiring expense = ~6% of revenue), as group-wide utilisation can coexist with specialist crane shortages by site or project timing.</p>
+    <div class="row">${button('Check Receivables (Drawdown Check)','caseTab:tranches',true)}${button('Open Cash Stress','caseTab:planner')}${button('Inspect FX & Pricing Clause','caseTab:fx')}</div>
+  </section>
+  ${comp?`<details class="clean-collapse"><summary>Part 1 Quantitative Ratios (FY2024–FY2026 vs. Hiap Tong) &amp; Excel Export</summary><div class="clean-collapse-body">${level3RatioCard(comp)}${aiRatioAnomalyCard(comp)}</div></details>
+  <details class="clean-collapse"><summary>Part 1 Qualitative Assessment (5Cs, Porter’s Five Forces &amp; Sustainability)</summary><div class="clean-collapse-body">${qualitativeRiskCard(loan,comp)}</div></details>`:''}`;
+}
+
+function tiongWoonRcfFrame(loan,company){
+  const views=[
+    ['overview','Overview',twcRcfFacilityCard],
+    ['tranches','Drawdown Check',twcRcfDrawdownCard],
+    ['planner','Cash Stress',twcRcfCashCard],
+    ['fx','FX Hedge',twcRcfFxCard],
+    ['review','Credit Review',twcRcfCreditCard]
+  ];
+  const view=views.find(row=>row[0]===caseTab)||views[0];
+  return `<div class="breadcrumb"><button class="linkbtn" data-action="go:loans">${isAnalyst()?'Loans &amp; applications':'Loans'}</button><span>/</span><span>${E(loan.id)}</span></div>`
+    +pageIntro(loan.title,company.profile.name+' · '+loan.id,`<div class="row">${caseStatus(loan)}${button('Back to loans','go:loans')}${button('Open Map','caseNetwork')}</div>`)
+    +`<div class="tabs case-tabs" role="navigation" aria-label="Loan workspace">${views.map(row=>button(row[1],'caseTab:'+row[0],view===row)).join('')}</div>`
+    +view[2](loan,company);
+}
+
+function twcRcfMapLink(row){
+  const loan=companyLoans(row.company.id).find(isTiongWoonRcf);
+  if(!loan)return '';
+  const state=twcRcfState(loan);
+  const activeFlows=twcRcfFlows(state,true);
+  const flows=TWC_RCF_FLOWS.filter(flow=>flow.dep===row.dep.id&&flow.ccy!=='SGD');
+  if(!flows.length)return '';
+  return flows.map(flow=>{
+    const cur=activeFlows.find(f=>f.id===flow.id)||flow;
+    const isDelay=row.dep.id===TWC_RCF_EVENT.dep&&flow.id===TWC_RCF_EVENT.invoice;
+    const eventText=isDelay?TWC_RCF_EVENT.title:flow.id===TWC_RCF_PRICING.invoice?'Supplier pricing clause exposure (25% USD steel indexed)':'Linked foreign-currency obligation';
+    const dueLabel=isDelay&&state.receiptDelay?`${twcRcfDate(cur.day)} (Delayed +20d from ${twcRcfDate(flow.day)})`:twcRcfDate(cur.day);
+    return `<article class="country-evidence">${tag('Transaction-linked event','green')}<strong style="display:block;margin-top:4px">${E(eventText)}</strong>
+      <p style="margin:4px 0"><strong>Source:</strong> ${E(flow.source||'Illustrative notice')}<br><strong>Counterparty:</strong> ${E(row.dep.name)} (${E(row.dep.country)})<br><strong>Project:</strong> ${E(flow.project||'Heavy-lift package')}<br><strong>Linked ${flow.side==='receive'?'receipt':'invoice'}:</strong> ${E(flow.id)} · ${E(twcRcfCcy(cur.amount,cur.ccy))} · Due ${E(dueLabel)}</p>
+      ${button('Open in FX Hedge →','twcRcfMapFx:'+loan.id+':'+flow.id,true)}</article>`;
+  }).join('');
+}
+
+function twcRcfMapWatchExtras(country=''){
+  const loan=companyLoans('tiongwoon').find(isTiongWoonRcf);
+  if(!loan||(isAnalyst()&&networkCompanyId!=='all'&&networkCompanyId!=='tiongwoon')||(!isAnalyst()&&DB.customerId!=='tiongwoon'))return '';
+  if(country&&country!=='Malaysia'&&country!=='China')return '';
+  const items=[];
+  if(!country||country==='Malaysia'){
+    items.push({id:'RC-USD-01',ccy:'USD',amt:'USD 300,000',cp:'Regional EPC Contractor B (Malaysia)',project:TWC_RCF_EVENT.project,source:TWC_RCF_EVENT.source,title:TWC_RCF_EVENT.title,due:twcRcfDate(twcRcfState(loan).receiptDelay?36:16)});
+  }
+  if(country==='China'){
+    items.push({id:'AP-USD-01',ccy:'USD',amt:'USD 500,000',cp:'Rigging Supplier A (China)',project:'Semiconductor & public infrastructure integrated heavy-lift',source:'Supplier invoice RIG-A-01 (Illustrative)',title:'USD supplier payment affected by RC-USD-01 timing',due:twcRcfDate(25)});
+    items.push({id:'AP-CNY-01',ccy:'CNY',amt:'CNY 100,000 (25% USD steel linked)',cp:'Components Supplier C (China)',project:'Biopharmaceutical equipment installation',source:TWC_RCF_PRICING.document,title:'Indirect FX exposure via steel benchmark clause',due:twcRcfDate(54)});
+  }
+  return `<h3>Transaction-linked FX events</h3>`+items.map(x=>`<article class="country-evidence">${tag('Linked to FX & Cash','green')}<strong style="display:block;margin-top:4px">${E(x.title)}</strong><p style="margin:4px 0"><strong>Source:</strong> ${E(x.source)}<br><strong>Counterparty:</strong> ${E(x.cp)}<br><strong>Project:</strong> ${E(x.project)}<br><strong>Flow:</strong> ${E(x.id)} · ${E(x.amt)} · Due ${E(x.due)}</p>${button('Open in FX Hedge →','twcRcfMapFx:'+loan.id+':'+x.id,true)}</article>`).join('');
+}
+
+function twcRcfTour(kind,loan){
+  const nav=(tab,persona='')=>()=>{if(persona)setPersona(persona);activeLoanId=loan.id;page='case';caseTab=tab;};
+  const title={'cfo':'CFO Quick Guide','maker':'Finance Manager Guide','rm':'DBS Bank Desk Guide'}[kind]||'3-Step Pitch Tour';
+  return{title,steps:[
+    {title:'1. Check invoice eligibility',body:'Only unpaid, certified, undisputed invoices count (S$4m → S$3m borrowing base at 75%). Click "Simulate prior assignment" to exclude AR-SGD-02 and see the S$750k excess to repay or replace.',selector:'[data-action="twcRcfAssignment"], #twcBorrowingBase',badge:'Step 1 · Prior Assignment',nav:nav('tranches',kind==='rm'?'Relationship Manager':'CFO / Approver')},
+    {title:'2. Trace receipt delay & indirect FX',body:'Apply the 20-day delay on RC-USD-01 (USD 300k) to see AP-USD-01 jump from USD 100k to USD 400k exposed, or test the 25% USD steel pricing clause on AP-CNY-01.',selector:'[data-action="twcRcfDelay"], #twcEventFx',badge:'Step 2 · Receipt Delay & FX',nav:nav('fx')},
+    {title:'3. Review dated funding decision',body:'Measure the peak funding gap against entered project cash and existing headroom. If existing liquidity covers the gap, IDEAL Lens advises declining extra credit.',selector:'#twcCashDecision, #twcCashForecast',badge:'Step 3 · Cash Sizing',nav:nav('planner')}
+  ]};
+}
+
 function tiongWoonCompanyAndLoan(base){
   const c=baseCompany(base,'tiongwoon');
   c.profile={name:'Tiong Woon Corporation Holding Ltd',industry:'Heavy lift, haulage & marine transport (SGX: BQM)',country:'Singapore',location:'15 Pandan Crescent, Singapore 128470',lat:1.3016,lon:103.7518,locationPrecision:'Declared waterfront HQ & yard',uen:'199705837C',contact:'William Tan Kwang Hwee · Group CFO / Treasury',email:'treasury@tiongwoon.com'};
@@ -781,96 +1404,20 @@ function tiongWoonCompanyAndLoan(base){
     {id:'mammoet-th',name:'Mammoet Strategic Alliance (Thailand)',alias:'Mammoet Thailand',kind:'Partner',country:'Thailand',site:'Rayong & Laem Chabang Petrochemical Hub',lat:12.6814,lon:101.2816,item:'Turnkey heavy-lift & transport alliance servicing Rayong petrochemical projects (THB)',share:10,inventory:0,alternatives:2,terms:45,confirmed:true,bankReviewed:true,publicSource:true,url:'https://www.tiongwoon.com',locationPrecision:'Declared site'},
     {id:'changi-t5',name:'Changi Airport T5 & Jurong Island EPC Corridor',alias:'Changi T5 / Jurong',kind:'Customer',country:'Singapore',site:'Changi East T5 & Jurong Island Industrial Cluster',lat:1.3521,lon:103.9890,item:'Changi Terminal 5 civil works, Jurong Island turnarounds & HDB PPVC tower lifting (SGD)',share:42,inventory:0,alternatives:4,terms:45,confirmed:true,bankReviewed:true,publicSource:true,url:'https://www.tiongwoon.com',locationPrecision:'Declared site'}
   ];
-  c.events=[
-    {id:'twc-mom-delay',dep:'xcmg',date:'2026-11-18',title:'[Illustrative Commissioning Notice] Pandan Crescent Yard: Cranes CRN-TW-08 to CRN-TW-10 delayed ~3 wks pending MOM AE load-test witness',text:'Boom-hoist hydraulic calibration & MOM Authorised Examiner 125% static load-test witness shifted to 9 Dec 2026 for cranes CRN-TW-08..10 at 15 Pandan Crescent. 7 of 10 invoiced units cleared.',source:'XCMG / Tiong Woon Yard Commissioning Notice (Illustrative)',url:'https://www.tiongwoon.com',type:'Supplier disruption',status:'New',priority:'High',engine:'Illustrative drawdown simulation',confirmedWeeks:3,note:'',missing:'Confirm MOM AE load-test certificates for remaining 3 cranes (CRN-TW-08..10) prior to full Tranche 2 draw.'},
-    {id:'twc-fy26-ar',dep:'changi-t5',date:'2026-09-25',title:'Tiong Woon FY2026 net profit rises 24% to S$23.9M; wins Gold Best Managed Board & targets S$200M FY2030 revenue',text:'FY2026 revenue grew 15% to S$187.7M and operating cash flow reached S$67.5M ahead of Changi T5 civil works, while targeting S$200M annual revenue by FY2030.',source:'Tiong Woon FY2026 Annual Report / SGX',url:'https://www.tiongwoon.com/investor-relations/annual-reports/',type:'Corporate action',status:'Relevant',priority:'Review',engine:'Public filing',confirmedWeeks:null,note:'',missing:'Structure DBS facility mix for low-emission crane replacement capex to win wallet share alongside UOB/OCBC.'},
-    {id:'twc-saudi',dep:'twc-arabia',date:daysAgo(4),title:'TWC Arabia Jubail petrochemical heavy-lift mobilisation & SAR/SGD treasury oversight',text:'Regional Middle East and India industrial project awards expand offshore heavy-lift deployment while requiring multi-currency working-capital buffering.',source:'Tiong Woon Corporate Operational Update',url:'https://www.tiongwoon.com',type:'General development',status:'Relevant',priority:'Review',engine:'Public filing',confirmedWeeks:null,note:'',missing:'Track SAR/INR receivable collection days (117.7d FY2026 group DSO) against committed RCF liquidity.'},
-    {id:'twc-mammoet-2023',dep:'mammoet-th',date:'2023-08-18',title:'[Historical Reference · Aug 2023] Tiong Woon–Mammoet Thailand asset acquisition & strategic alliance',text:'Historical 2023 Thailand fleet acquisition and alliance announcement. Excluded from 2026 Singapore Pandan Crescent crane drawdown checks.',source:'SGX / Tiong Woon Announcement (Aug 2023)',url:'https://www.tiongwoon.com',type:'Corporate action',status:'Reviewed',priority:'Review',engine:'Historical archive',confirmedWeeks:null,note:'',missing:'Historical alliance release — excluded from 2026 Tranche 2 crane drawdown checks.'}
-  ];
+  c.events=[{
+    id:'twc-project-announcement-2026',dep:'',date:'2026-02-24',
+    title:'Tiong Woon announces ongoing and new projects with an estimated combined value above S$40m',
+    text:'The projects span semiconductor, public infrastructure and biopharmaceutical work. Individual billing schedules and remaining contract balances require confirmation.',
+    source:'Tiong Woon media release',url:TWC_RCF_PROJECT_SOURCE,type:'Corporate action',
+    status:'Relevant',priority:'Review',engine:'Public announcement',confirmedWeeks:null,note:'',
+    missing:'Obtain remaining project cash flows and verify debtor and invoice eligibility.'
+  }];
   c.makerReviewed=true;c.makerReviewedBy='Kelvin Soh · Finance Manager';c.makerReviewedAt='2026-11-11T09:00:00Z';
   c.confirmed=true;c.confirmedBy='William Tan Kwang Hwee · Group CFO (Attested FY2026)';c.confirmedAt='2026-11-12T10:15:00Z';
   c.publicProfile=true;c.updatedAt='2026-11-18T09:00:00Z';
 
-  const lt=baseLoan(base,c.id,'TWC-DBS-2026','Low-Emission Heavy-Lift & Hybrid Crane Fleet Facility (Illustrative Approved)','Offer accepted');
-  lt.region='Asia Pacific';
-  lt.owner='DBS Institutional Banking · Infrastructure & Industrials';
-  lt.makerPreparedBy='Kelvin Soh · Finance Manager';
-  lt.application={
-    purpose:'[Illustrative DBS Facility] Finance low-emission Stage-V/hybrid crawler & all-terrain cranes anchored at 15 Pandan Crescent waterfront yard to serve Changi Airport T5 civil packages, semiconductor fabs, and regional refinery turnarounds (DBS wallet-share structure alongside incumbent principal bankers UOB/OCBC).',
-    growth:'Capture Singapore mega-infrastructure upcycle (Changi T5, Tuas Mega Port, MRT Cross Island Line, HDB PPVC) and Middle East/India heavy-lift projects toward Tiong Woon’s FY2030 S$200M revenue roadmap while modernising carbon-efficient crane assets.',
-    currency:'SGD',
-    project:50000000,
-    contingency:3000000,
-    workingCapital:2000000,
-    equityFunding:10000000,
-    availableFacility:5000000,
-    facilityConfirmed:true,
-    requested:40000000,
-    bufferReason:'S$3.0m Pandan Crescent jetty mobilisation & heavy rigging contingency + S$2.0m crane spares & cross-border commissioning working capital.',
-    amountReason:'',
-    collateral:'First fixed charge over funded low-emission Liebherr & Stage-V/hybrid crane fleet at 15 Pandan Crescent plus assignment of Changi T5 / Jurong Island heavy-lift contract proceeds and crane hull-and-machinery insurance.'
-  };
-  lt.terms={product:'Amortising term loan',years:5,rate:3.80,grace:6,fee:0.35};
-  lt.sllApplied=false;lt.fxLocked=false;lt.fxStrategy='Natural Hedge (EUR/SGD) + 6M Cap';lt.fxShock=0;lt.fxOption=2;lt.becTamper=false;lt.trancheScanAt='2026-11-18T14:20:00Z';
-  lt.cures={rephase:false,rcf:false,waiver:false};lt.cureApprovedRef='';lt.cpVerified={cp_fin:true,cp_sec:true,cp_tranche:false,cp_fx:false};
-  lt.tranches=[
-    {id:'tw-t1',name:'Tranche 1 · Liebherr High-Tonnage All-Terrain Cranes (4 LTM Units)',vendor:'Liebherr-Werk Ehingen GmbH',currency:'EUR',amount:16000000,invoiceRef:'INV #LBH-DE-2604 (4 LTM all-terrain cranes)',docRef:'BoL #BOL-RTM-8821 · MOM Type Cert #LBH-4',guardrail:'PASS · 4/4 Liebherr crane serials matched & customs-cleared at Pandan Jetty',status:'Verified · Ready for Drawdown'},
-    {id:'tw-t2',name:'Tranche 2 · Stage-V / Hybrid Crawler & Tower Cranes (10 Units · Illustrative)',vendor:'XCMG / Zoomlion Heavy Crane Group',currency:'SGD',amount:14000000,requestedAmount:14000000,holdbackAmount:630000,invoiceRef:'INV #XCMG-SG-4410 (10 cranes · S$210k commissioning balance/unit)',docRef:'MOM Cert #MOM-AE-2026-07 (7/10 commissioned: CRN-TW-01..07)',guardrail:'HOLD · 3 cranes (CRN-TW-08..10) pending MOM AE load-test witness — S$630,000 holdback under Clause 4.2A',status:'Discrepancy Hold (S$630k)'},
-    {id:'tw-t3',name:'Tranche 3 · Regional SPMT Heavy Haulage & India/Saudi Mobilisation',vendor:'TWC Arabia Company Ltd',currency:'USD',amount:10000000,invoiceRef:'Schedule TWC-2027-Q1 (SPMT axle lines)',docRef:'Jubail & Mumbai Mobilisation Permit Pending',guardrail:'SCHEDULED · Delivery & regional site acceptance slated Q1 2027',status:'Scheduled Q1 2027'}
-  ];
-  lt.drawdownCase={
-    illustrative:true,
-    trancheId:'tw-t2',
-    site:'15 Pandan Crescent Yard, Singapore (Tiong Woon — Borrower-Owned Fleet)',
-    ownerEntity:'Tiong Woon Corporation Holding Ltd (Direct Legal Owner · SGX: BQM)',
-    payerEntity:'Tiong Woon Crane & Transport (Pte) Ltd (Contractual OEM Invoice Payer)',
-    vendor:'XCMG / Zoomlion Heavy Crane Group',
-    invoiceRef:'INV #XCMG-SG-4410',
-    invoiceDate:'2026-11-16',
-    trancheRequested:14000000,
-    totalUnits:10,
-    baseCertifiedUnits:7,
-    certifiedUnits:7,
-    unitBalance:210000,
-    clauseMode:'partial',
-    delayWeeks:3,
-    delayWindow:'19 Nov 2026 – 9 Dec 2026',
-    weeklyExtraCostPerUnit:14000,
-    unitNoun:'crane',
-    unitPlural:'cranes',
-    pendingLabel:'crane(s) awaiting MOM AE load-test witness',
-    invoiceScope:'10 Stage-V / hybrid crawler & tower cranes (CRN-TW-01..10)',
-    cert1Title:'Accepted Load-Test Cert · MOM-AE-2026-07',
-    cert1Detail:'MOM Authorised Examiner cleared: CRN-TW-01 to CRN-TW-07 (7/10 cranes @ 15 Pandan Crescent)',
-    noticeTitle:'Yard Commissioning Notice · EPC-PSA-2026-1118 (2026-11-18)',
-    noticeQuote:'“Boom-hoist hydraulic calibration & MOM AE witness test delayed ~3 wks (19 Nov – 9 Dec 2026) for cranes CRN-TW-08 to CRN-TW-10.”',
-    cert2Applied:false,
-    cert2Short:'MOM Cert #08',
-    cert2Asset:'CRN-TW-08',
-    cert2BtnLabel:'+ Ingest Revised MOM Cert (+1 Crane: CRN-TW-08)',
-    cert2Ref:'MOM-AE-2026-08 (2026-11-20 · Crane CRN-TW-08 passed 125% static load test)',
-    costDriver:'temporary crane sub-hire / yard demobilisation',
-    ownershipNote:'100% borrower-owned fleet at 15 Pandan Crescent (direct OEM invoice payer). Supports Tiong Woon’s S$200M FY2030 target & DBS wallet-share pitch alongside incumbent UOB/OCBC.',
-    staleBtnLabel:'Test Stale 2023 Release (Reject)',
-    staleDoc:{label:'Stale Aug 2023 Release (Mammoet Thailand)',title:'Quarantined Noise Document · Stale 2023 Release Rejected',reason:'Matched event = Mammoet Thailand asset acquisition, Publication date = 2023-08-18 (3 years stale), Jurisdiction = Thailand ≠ 15 Pandan Crescent crane batch (CRN-TW-08..10). Drawdown eligibility unchanged.'},
-    siteBtnLabel:'Test Wrong-Site Notice (Reject)',
-    wrongSiteDoc:{label:'Wrong-Site Notice (TWC Arabia Jubail)',title:'Quarantined Noise Document · Wrong Subsidiary & Site Mismatch',reason:'Matched site = TWC Arabia Jubail Industrial City (Saudi petrochemical fleet) ≠ 15 Pandan Crescent Yard, Singapore (CRN-TW-08..10). Drawdown eligibility unchanged.'},
-    rejectedDoc:'',
-    workflow:'Drawdown under review',
-    cfoSubmitRef:'',
-    bankReviewRef:'',
-    bankReviewNote:''
-  };
-  lt.scenario={event:'twc-mom-delay',type:'Supplier disruption',weeks:3,inventory:0,replacement:40,recovery:25,revenueShare:6,margin:40.7,invoice:14000000,days:21,cost:126000,openingCash:86600000};
-  lt.cov={dscr:1.25,current:1.15,de:1.20,testDate:'2026-12-31',confirmed:true,definition:'Consolidated CFADS / annual debt service >= 1.25x; Current Assets / Current Liabilities >= 1.15x; Interest-Bearing Debt / Owners Equity <= 1.20x (tested semi-annually).'};
-  lt.message='Illustrative Approved DBS Facility (Offer Accepted). Tranche 2 crane drawdown (10 Stage-V/hybrid cranes) under review pending 3 MOM load-test witness certificates.';
-  lt.analystNote='';
-  lt.statusHistory=[
-    {status:'Submitted',time:'2026-11-05T09:00:00Z',message:'Illustrative S$40.0m low-emission crane fleet facility submitted by Tiong Woon Group CFO.'},
-    {status:'Offer issued',time:'2026-11-10T15:00:00Z',message:'DBS Credit Committee approved S$40.0m facility (3.80% base / SLL ratchet eligible) subject to MOM load-test commissioning evidence.'},
-    {status:'Offer accepted',time:'2026-11-14T10:30:00Z',message:'Offer accepted via Digital Token+. Tranche 2 Pandan Crescent drawdown request (S$14.0m) staged for MOM cert verification.'}
-  ];
-  return{company:c,loan:lt};
+  addTiongWoonRcfRelationships(c);
+  return{company:c,loan:makeTiongWoonRcf(base,c)};
 }
 function satsCompanyAndLoan(base){
   const c=baseCompany(base,'sats');
@@ -1083,8 +1630,7 @@ function seedPublicPortfolio(previous){
   });
 
   const seededAudit=[
-    {time:'2026-11-18T14:25:00Z',actor:'IDEAL Lens Evidence Co-Pilot',companyId:twc.company.id,loanId:'TWC-DBS-2026',action:'Matched Yard Commissioning Notice #EPC-PSA-2026-1118 to Tranche 2 (Pandan Crescent 7/10 cranes certified -> S$630,000 hold under Clause 4.2A)'},
-    {time:'2026-11-14T10:30:00Z',actor:'Customer · Group CFO (Digital Token+)',companyId:twc.company.id,loanId:'TWC-DBS-2026',action:'Accepted illustrative facility TWC-DBS-2026 (S$40.0m Low-Emission Crane Fleet) & staged Tranche 2 draw'},
+    {time:TWC_RCF_AS_OF+'T08:30:00+08:00',actor:'Demo case',companyId:twc.company.id,loanId:TWC_RCF_ID,action:'Opened the illustrative S$3m receivables revolving credit proposal (TWC-RCF-2026) for assessment.'},
     {time:'2026-11-12T10:15:00Z',actor:'Customer · Group CFO (Digital Token+)',companyId:twc.company.id,loanId:'',action:'Attested FY2024–FY2026 Tiong Woon consolidated financial statements [Digital Token+ #DT-90311]'},
     {time:'2026-11-18T14:20:00Z',actor:'IDEAL Lens Evidence Co-Pilot',companyId:c.id,loanId:'LN-2026-002',action:'Matched EPC Notice #EPC-UK-2026-1118 to Tranche 2 (Willesden 15/18 chargers certified -> S$420,000 hold under Clause 4.2A)'},
     {time:'2026-11-14T10:30:00Z',actor:'Customer · CFO / Approver (Digital Token+)',companyId:c.id,loanId:'LN-2026-002',action:'Accepted illustrative facility LN-2026-002 (S$45.0m UK/Victoria depots) & staged Tranche 2 draw'},
@@ -1094,7 +1640,7 @@ function seedPublicPortfolio(previous){
   ];
 
   const isAna=previous?.role==='Analyst';
-  return{version:3,role:isAna?'Analyst':'Customer',persona:isAna?'Relationship Manager':'Finance Maker',customerId:twc.company.id,activeLoanId:twc.loan.id,companies:[twc.company,c,sats.company,sci.company],loans:[twc.loan,l2,l,sats.loan,sci.loan],connection:{url:SERVICE_URL,ready:false,message:'',checkedAt:''},audit:seededAudit,csa:twc.company.csa,roi:defaultRoiState(),monitorEnabled:false,caseSequence:4};
+  return{version:3,role:isAna?'Analyst':'Customer',persona:isAna?'Relationship Manager':'Finance Maker',customerId:twc.company.id,activeLoanId:twc.loan.id,companies:[twc.company,c,sats.company,sci.company],loans:[twc.loan,l2,l,sats.loan,sci.loan],connection:{url:SERVICE_URL,ready:false,message:'',checkedAt:''},audit:seededAudit,csa:twc.company.csa,roi:defaultRoiState(),countrySignals:[{id:'twc-my-country-watch',country:'Malaysia',date:daysAgo(2),title:'Malaysia industrial transport & customs clearance advisory (Country-only match)',text:'Country-level logistics watch for Malaysia. Kept in review state separately from transaction-linked receipt RC-USD-01 until site or invoice impact is verified.',source:'Regional Logistics Watch (Illustrative)',url:TWC_RCF_PROJECT_SOURCE,status:'New',priority:'Review'}],countryWatchlist:['Singapore','Malaysia','China','Germany','Saudi Arabia','India','Thailand','United Kingdom','Australia'],monitorEnabled:false,caseSequence:4};
 }
 function companySnapshotCard(c){
   if(c.id==='comfortdelgro'||c.id==='cdg')return publicTreasuryCard()+publicInterimCard();
@@ -1215,8 +1761,8 @@ function setPersona(p){
   if(S)S.role=DB.role;
   hydrate();persist();render();
 }
-const companyLoans=cid=>DB.loans.filter(l=>l.companyId===cid);
-const visibleLoans=()=>isAnalyst()?DB.loans.filter(l=>!['Draft','Pending CFO approval'].includes(l.status)):companyLoans(DB.customerId);
+const companyLoans=cid=>DB.loans.filter(l=>l.companyId===cid&&!l.replacedTiongWoonDemo);
+const visibleLoans=()=>isAnalyst()?DB.loans.filter(l=>!l.replacedTiongWoonDemo&&!['Draft','Pending CFO approval'].includes(l.status)):companyLoans(DB.customerId);
 const tag=(text,color='')=>`<span class="tag ${color}">${E(text)}</span>`;
 const statusTag=s=>tag(s,s==='Information requested'||s==='Pending CFO approval'||s==='Pending credit approval'?'amber':s==='Disbursed'||s==='Offer accepted'?'green':s==='Draft'?'neutral':'red');
 const stamp=t=>t?new Date(t).toLocaleString('en-SG',{dateStyle:'medium',timeStyle:'short'}):'Not yet';
@@ -1378,15 +1924,15 @@ function validatePortfolio(x){if(!x||x.version!==3||!Array.isArray(x.companies)|
    if(!safeURL(l.disclosure.url)||!finite(l.disclosure.amount)||l.disclosure.amount<=0||l.disclosure.amount!==l.application.requested||!finite(l.disclosure.tenor)||l.disclosure.tenor<=0)throw Error('Invalid public facility disclosure.');
    l.terms={product:'Green term loan',years:l.disclosure.tenor,rate:null,grace:null,fee:null};
   }else if(!finite(l.terms.years)||l.terms.years<1||l.terms.years>15||!finite(l.terms.rate)||l.terms.rate<0||l.terms.rate>30||!finite(l.terms.grace)||l.terms.grace<0||l.terms.grace>=l.terms.years*12||!PRODUCTS.includes(l.terms.product))throw Error('Invalid facility terms.');l.statusHistory=Array.isArray(l.statusHistory)?l.statusHistory.slice(-100):[];l.scenarios=Array.isArray(l.scenarios)?l.scenarios.slice(0,6):[];l.tranches=Array.isArray(l.tranches)?l.tranches.slice(0,20):[];if(l.drawdownCase&&typeof l.drawdownCase==='object')l.drawdownCase={...l.drawdownCase};l.sllApplied=!!l.sllApplied;l.fxLocked=!!l.fxLocked;l.fxStrategy=typeof l.fxStrategy==='string'?l.fxStrategy.slice(0,120):'Natural Hedge (GBP/SGD) + 6M Cap';l.fxShock=[0,3,6].includes(Number(l.fxShock))?Number(l.fxShock):0;l.fxOption=[1,2,3].includes(Number(l.fxOption))?Number(l.fxOption):2;l.becTamper=!!l.becTamper;l.trancheScanAt=typeof l.trancheScanAt==='string'?l.trancheScanAt:'';l.cures={rephase:!!l.cures?.rephase,rcf:!!l.cures?.rcf,waiver:!!l.cures?.waiver};l.cureApprovedRef=typeof l.cureApprovedRef==='string'?l.cureApprovedRef:'';l.cpVerified=(l.cpVerified&&typeof l.cpVerified==='object')?{cp_fin:!!l.cpVerified.cp_fin,cp_sec:!!l.cpVerified.cp_sec,cp_tranche:!!l.cpVerified.cp_tranche,cp_fx:!!l.cpVerified.cp_fx}:{cp_fin:false,cp_sec:false,cp_tranche:false,cp_fx:false};l.productMix=[1,2,3].includes(Number(l.productMix))?Number(l.productMix):1;l.lcIssued=!!l.lcIssued;l.lcRef=typeof l.lcRef==='string'?l.lcRef:'';l.lcStaged=!!l.lcStaged;l.lcStagedBy=typeof l.lcStagedBy==='string'?l.lcStagedBy:'';l.lcAuthRef=typeof l.lcAuthRef==='string'?l.lcAuthRef:'';l.fxStaged=!!l.fxStaged;l.fxStagedBy=typeof l.fxStagedBy==='string'?l.fxStagedBy:'';l.fxAuthRef=typeof l.fxAuthRef==='string'?l.fxAuthRef:'';}
- if(!ids.has(x.customerId))throw Error('Customer profile is missing.');x.role=x.role==='Analyst'?'Analyst':'Customer';if(!PERSONA_MAP[x.persona]||PERSONA_MAP[x.persona].group!==x.role)x.persona=x.role==='Analyst'?'Relationship Manager':'Finance Maker';const legacyCsa=x.csa&&Array.isArray(x.csa.users)&&Array.isArray(x.csa.policies)?x.csa:null;for(const c of x.companies){if(c.id==='comfortdelgro'&&/^Tan Wei Ming/i.test(c.profile?.contact||'')){c.profile.contact='Lim Mei Ling · Group CFO / Treasury';}c.csa=ensureCsaDefaults(c.csa||(c.id===x.customerId&&legacyCsa?clone(legacyCsa):null),c);if(c.id==='comfortdelgro'){const u2=c.csa.users.find(u=>u.id==='u-2');if(u2&&/^Tan Wei Ming$/i.test(u2.name||'')){u2.name='Lim Mei Ling';u2.email='meiling.lim@comfortdelgro.com';}}c.idealConnect=ensureConnectDefaults(c.idealConnect,c);}x.csa=ensureCsaDefaults(x.companies.find(c=>c.id===x.customerId)?.csa||legacyCsa,x.companies.find(c=>c.id===x.customerId));x.roi=x.roi&&finite(x.roi.annualCases)?x.roi:defaultRoiState();x.connection={url:safeURL(x.connection?.url)||SERVICE_URL,ready:false,message:'',checkedAt:''};x.audit=Array.isArray(x.audit)?x.audit.slice(0,500):[];x.caseSequence=Number.isInteger(x.caseSequence)?x.caseSequence:100;x.monitorEnabled=!!x.monitorEnabled;x.countrySignals=(Array.isArray(x.countrySignals)?x.countrySignals:[]).filter(e=>e&&typeof e.country==='string'&&typeof e.title==='string'&&safeURL(e.url)&&typeof e.date==='string').slice(-1000);if(Array.isArray(x.countryWatchlist))x.countryWatchlist=x.countryWatchlist.filter(c=>typeof c==='string'&&c.length<90).slice(0,32);x.countryCoverage=(Array.isArray(x.countryCoverage)?x.countryCoverage:[]).filter(c=>typeof c==='string'&&c.length<90).slice(0,32);return x;}
+ if(!ids.has(x.customerId))throw Error('Customer profile is missing.');x.role=x.role==='Analyst'?'Analyst':'Customer';if(!PERSONA_MAP[x.persona]||PERSONA_MAP[x.persona].group!==x.role)x.persona=x.role==='Analyst'?'Relationship Manager':'Finance Maker';const legacyCsa=x.csa&&Array.isArray(x.csa.users)&&Array.isArray(x.csa.policies)?x.csa:null;for(const c of x.companies){if(c.id==='comfortdelgro'&&/^Tan Wei Ming/i.test(c.profile?.contact||'')){c.profile.contact='Lim Mei Ling · Group CFO / Treasury';}c.csa=ensureCsaDefaults(c.csa||(c.id===x.customerId&&legacyCsa?clone(legacyCsa):null),c);if(c.id==='comfortdelgro'){const u2=c.csa.users.find(u=>u.id==='u-2');if(u2&&/^Tan Wei Ming$/i.test(u2.name||'')){u2.name='Lim Mei Ling';u2.email='meiling.lim@comfortdelgro.com';}}c.idealConnect=ensureConnectDefaults(c.idealConnect,c);}x.csa=ensureCsaDefaults(x.companies.find(c=>c.id===x.customerId)?.csa||legacyCsa,x.companies.find(c=>c.id===x.customerId));x.roi=x.roi&&finite(x.roi.annualCases)?x.roi:defaultRoiState();x.connection={url:safeURL(x.connection?.url)||SERVICE_URL,ready:false,message:'',checkedAt:''};x.audit=Array.isArray(x.audit)?x.audit.slice(0,500):[];x.caseSequence=Number.isInteger(x.caseSequence)?x.caseSequence:100;x.monitorEnabled=!!x.monitorEnabled;x.countrySignals=(Array.isArray(x.countrySignals)?x.countrySignals:[]).filter(e=>e&&typeof e.country==='string'&&typeof e.title==='string'&&safeURL(e.url)&&typeof e.date==='string').slice(-1000);if(Array.isArray(x.countryWatchlist))x.countryWatchlist=x.countryWatchlist.filter(c=>typeof c==='string'&&c.length<90).slice(0,32);x.countryCoverage=(Array.isArray(x.countryCoverage)?x.countryCoverage:[]).filter(c=>typeof c==='string'&&c.length<90).slice(0,32);return migrateTiongWoonRcf(x);}
 function loadPortfolio(){try{const saved=localStorage.getItem(KEY);if(saved)return validatePortfolio(JSON.parse(saved));const previous=localStorage.getItem('ideal-lens-v10')||localStorage.getItem('ideal-lens-v9')||localStorage.getItem('ideal-lens-v8')||localStorage.getItem('ideal-lens-v7')||localStorage.getItem('ideal-lens-v6')||localStorage.getItem('ideal-lens-v5')||localStorage.getItem('ideal-lens-public-v5')||localStorage.getItem('ideal-lens-v3')||localStorage.getItem('ideal-lens-v2');if(previous)return seedPublicPortfolio(JSON.parse(previous));}catch(e){console.warn('Workspace loading:',e.message);}return seedPublicPortfolio();}
 function selectLoan(id,nextTab='overview'){flush();const l=loanById(id);if(!l||(isAnalyst()&&['Draft','Pending CFO approval'].includes(l.status))||(!isAnalyst()&&l.companyId!==DB.customerId)){toast('This case is unavailable in this workspace.');return;}activeLoanId=l.id;DB.activeLoanId=l.id;profileId=l.companyId;caseTab=nextTab;page='case';editDep=null;stageImport=null;hydrate();persist();render();window.scrollTo({top:0,behavior:'smooth'});}
 function go(p){flush();const aliases={documents:['profile','financials'],alerts:['case','review','monitoring'],exposure:['network'],tranches:['case','tranches'],fx:['case','fx'],scenarios:['case','planner'],covenants:['case','covenants'],review:['case','review','decision'],application:['application']};if(aliases[p]){const [dest,tab,sub]=aliases[p];page=dest;if(dest==='profile'){profileId=activeLoan()?.companyId||DB.customerId;profileTab=tab;}else if(tab)caseTab=tab;if(sub)reviewTab=sub;}else page=p;if(page==='network'){networkEditorOpen=false;networkEditCompanyId=isAnalyst()?activeLoan()?.companyId||DB.customerId:DB.customerId;}if(page==='profile'&&!profileId)profileId=DB.customerId;editDep=null;hydrate();render();window.scrollTo({top:0,behavior:'smooth'});}
-function caseModel(l){if(isDisclosed(l))return null;return withLoan(l,()=>readyForModel()?model():null);}
+function caseModel(l){if(isDisclosed(l)||isTiongWoonRcf(l))return null;return withLoan(l,()=>readyForModel()?model():null);}
 function loanBalance(l){if(isDisclosed(l))return null;if(l.status!=='Disbursed')return 0;const start=new Date((l.disbursedAt||today())+'T00:00:00'),now=new Date(),months=Math.max(0,(now.getFullYear()-start.getFullYear())*12+now.getMonth()-start.getMonth());const rows=schedule(l.application.requested,l.terms.rate,l.terms.years,l.terms.product,l.terms.grace);return months?rows[Math.min(months-1,rows.length-1)]?.balance??0:l.application.requested;}
 function nextPayment(l){if(isDisclosed(l)||l.status!=='Disbursed')return null;const start=new Date((l.disbursedAt||today())+'T00:00:00'),now=new Date(),month=Math.max(0,(now.getFullYear()-start.getFullYear())*12+now.getMonth()-start.getMonth()),rows=schedule(l.application.requested,l.terms.rate,l.terms.years,l.terms.product,l.terms.grace);const row=rows[month];if(!row)return null;const due=new Date(start.getFullYear(),start.getMonth()+month+1,start.getDate());return{amount:row.payment,date:due.toLocaleDateString('en-SG',{dateStyle:'medium'})};}
-function covenantSummary(l){if(isDisclosed(l))return{values:[],breaches:[],confirmed:false};return withLoan(l,()=>{const values=covValues(),breaches=values.filter(v=>v.actual!==null&&(v.min?v.actual<v.limit:v.actual>v.limit));return{values,breaches,confirmed:S.cov.confirmed};});}
-function pendingSignals(companies=DB.companies){return companies.flatMap(c=>{const loan=companyLoans(c.id).find(l=>!['Draft','Pending CFO approval'].includes(l.status))||companyLoans(c.id)[0],events=c.events.filter(e=>e.status==='New').map(event=>({company:c,event,loan}));for(const d of c.deps.filter(d=>d.confirmed))for(const e of countrySignals(d.country).filter(e=>e.status==='New'))if(!events.some(x=>x.event.url===e.url))events.push({company:c,event:{...e,dep:d.id,locationMatch:true},loan});return events;});}
+function covenantSummary(l){if(isDisclosed(l)||isTiongWoonRcf(l))return{values:[],breaches:[],confirmed:false};return withLoan(l,()=>{const values=covValues(),breaches=values.filter(v=>v.actual!==null&&(v.min?v.actual<v.limit:v.actual>v.limit));return{values,breaches,confirmed:S.cov.confirmed};});}
+function pendingSignals(companies=DB.companies){return companies.flatMap(c=>{const loan=companyLoans(c.id).find(l=>!['Draft','Pending CFO approval'].includes(l.status))||companyLoans(c.id)[0],events=c.events.filter(e=>e.status==='New'&&(!isTiongWoonRcf(loan)||e.id!=='twc-mom-delay')).map(event=>({company:c,event,loan}));for(const d of c.deps.filter(d=>d.confirmed))for(const e of countrySignals(d.country).filter(e=>e.status==='New'))if(!events.some(x=>x.event.url===e.url))events.push({company:c,event:{...e,dep:d.id,locationMatch:true},loan});return events;});}
 function customerPack(){const cid=DB.customerId,copy=clone(DB);copy.role='Customer';copy.companies=copy.companies.filter(c=>c.id===cid).map(c=>({...c,events:c.events.filter(e=>e.status!=='Dismissed').map(({note,...e})=>e),deps:c.deps.map(({bankReviewed,...d})=>d)}));copy.csa=clone(activeCsa(companyById(cid)));copy.loans=copy.loans.filter(l=>l.companyId===cid).map(({analystNote,...l})=>l);copy.audit=copy.audit.filter(a=>a.companyId===cid&&!String(a.actor||'').startsWith('DBS'));copy.activeLoanId=copy.loans[0]?.id||'';copy.connection={url:DB.connection.url};const countries=new Set(copy.companies.flatMap(c=>c.deps.map(d=>canonicalCountry(d.country))));copy.countrySignals=(copy.countrySignals||[]).filter(e=>countries.has(canonicalCountry(e.country)));copy.countryWatchlist=[...countries];copy.countryCoverage=(copy.countryCoverage||[]).filter(c=>countries.has(canonicalCountry(c)));return copy;}
 function submissionIssues(){const issues=[];if(!S.company.name.trim()||!S.company.industry.trim())issues.push('Complete the company profile');if(!S.company.purpose.trim()||!S.company.growth.trim())issues.push('Enter the financing purpose and growth opportunity');if(S.company.project<=0||S.company.requested<=0)issues.push('Enter a positive project cost and requested amount');if(!S.confirmed||!finite(latest().revenue))issues.push('Attest company financials (CFO / Approver Digital Token+)');if(Math.abs(fundingDifference())>=1&&!S.company.amountReason.trim())issues.push('Explain the funding difference');if(S.company.contingency+S.company.workingCapital>0&&!S.company.bufferReason.trim())issues.push('Explain the funding allowances');if(S.deps.some(d=>!d.confirmed))issues.push('Confirm declared business relationships');return issues;}
 function routeForCfoApproval(){const l=activeLoan();if(!l)throw Error('Select a loan application.');if(!isCustomerMaker())throw Error('Only Finance Maker prepares and routes drafts for CFO approval.');if(!['Draft','Information requested'].includes(l.status))throw Error('This application is already routed or submitted.');const co=activeCompany();const makerLabel=(co?.profile?.name||'Corporate')+' · Finance Maker';S.status='Pending CFO approval';S.message='Prepared by Finance Maker. Pending CFO / Approver Digital Token+ sign-off.';S.statusHistory.push({status:'Pending CFO approval',time:new Date().toISOString(),message:S.message});l.makerPreparedBy=makerLabel;l.updatedAt=new Date().toISOString();audit('Maker routed application '+l.id+' for CFO Digital Token+ approval');persist();caseTab='overview';page='case';hydrate();render();toast(l.id+' routed to CFO / Approver. Switch persona to authorize with Digital Token+.');}
@@ -1436,7 +1982,7 @@ function verifyAuditChain(rows){
 }
 function pageIntro(title,sub,action=''){return `<div class="pagehead"><div><p class="eyebrow">${isAnalyst()?'DBS IBG · CORPORATE BANKING':'DBS IDEAL · BUSINESS FINANCING'}</p><h1>${E(title)}</h1><p class="sub">${E(sub)}</p></div>${action}</div>`;}
 function statGrid(values){return `<div class="grid four metrics">${values.map(v=>kpi(E(v[0]),v[1],E(v[2]||''))).join('')}</div>`;}
-function caseTable(loans,compact=false){return `<div class="tablewrap"><table class="case-table"><thead><tr><th>${isAnalyst()?'Company / facility':'Facility'}</th><th>Reference</th><th>Amount</th><th>Status</th>${compact?'':'<th>Next action</th>'}<th></th></tr></thead><tbody>${loans.map(l=>{const c=companyById(l.companyId),p=nextPayment(l),disclosed=isDisclosed(l);const nextMsg=disclosed?'View public record':l.status==='Pending CFO approval'?'CFO Digital Token+ sign-off':l.status==='Pending credit approval'?'Credit Approver Token+ sign-off':l.status==='Information requested'?l.message:l.status==='Draft'?'Maker: complete & route':p?'Payment due '+p.date:l.status==='Submitted'?'Awaiting RM assessment':'Review case details';return `<tr><td><button class="table-link" data-action="openCase:${E(l.id)}">${E(isAnalyst()?c.profile.name:l.title)}</button><small>${E(isAnalyst()?l.title:disclosed?'DBS · Green term loan':l.terms.product)}</small></td><td>${E(l.id)}<small>${E(l.region)}</small>${companyCountryFlags(l.companyId).length?'<span class="country-loan-flag">Country signal · review required</span>':''}</td><td><strong>${money(disclosed?l.disclosure.amount:l.status==='Disbursed'?loanBalance(l):l.application.requested,true)}</strong><small>${disclosed?'Announced amount':l.status==='Disbursed'?'Outstanding principal':'Requested facility'}</small></td><td>${caseStatus(l)}</td>${compact?'':`<td class="next-action">${E(nextMsg)}</td>`}<td>${button(l.status==='Draft'&&!isAnalyst()?'Continue':'Open','openCase:'+l.id)}</td></tr>`;}).join('')||'<tr><td colspan="6" class="empty">No matching facilities.</td></tr>'}</tbody></table></div>`;}
+function caseTable(loans,compact=false){return `<div class="tablewrap"><table class="case-table"><thead><tr><th>${isAnalyst()?'Company / facility':'Facility'}</th><th>Reference</th><th>Amount</th><th>Status</th>${compact?'':'<th>Next action</th>'}<th></th></tr></thead><tbody>${loans.map(l=>{const c=companyById(l.companyId),p=nextPayment(l),disclosed=isDisclosed(l);const nextMsg=disclosed?'View public record':l.status==='Pending CFO approval'?'CFO Digital Token+ sign-off':l.status==='Pending credit approval'?'Credit Approver Token+ sign-off':l.status==='Information requested'?l.message:l.status==='Draft'?'Maker: complete & route':p?'Payment due '+p.date:l.status==='Submitted'?'Awaiting RM assessment':'Review case details';return `<tr><td><button class="table-link" data-action="openCase:${E(l.id)}">${E(isAnalyst()?c.profile.name:l.title)}</button><small>${E(isAnalyst()?l.title:disclosed?'DBS · Green term loan':isTiongWoonRcf(l)?'Secured SGD revolving credit line':l.terms.product)}</small></td><td>${E(l.id)}<small>${E(l.region)}</small>${companyCountryFlags(l.companyId).length?'<span class="country-loan-flag">Country signal · review required</span>':''}</td><td><strong>${money(disclosed?l.disclosure.amount:l.status==='Disbursed'?loanBalance(l):l.application.requested,true)}</strong><small>${disclosed?'Announced amount':l.status==='Disbursed'?'Outstanding principal':isTiongWoonRcf(l)?'Proposed ceiling':'Requested facility'}</small></td><td>${caseStatus(l)}</td>${compact?'':`<td class="next-action">${E(nextMsg)}</td>`}<td>${button(l.status==='Draft'&&!isAnalyst()?'Continue':'Open','openCase:'+l.id)}</td></tr>`;}).join('')||'<tr><td colspan="6" class="empty">No matching facilities.</td></tr>'}</tbody></table></div>`;}
 function signalList(items,limit=10){return `<div class="signal-list">${items.slice(0,limit).map(({company:c,event:e,loan:l})=>`<div class="signal-row"><div class="signal-dot ${e.priority==='High'?'urgent':''}"></div><div><p class="signal-title">${E(e.title)}</p><p class="tiny muted">${E(c.profile.name)} · ${E(e.source)} · ${E(e.date)}${e.locationMatch?' · Location match; relevance unconfirmed':''}</p></div><div>${tag(e.priority==='High'?'Priority review':'To review',e.priority==='High'?'red':'amber')}</div>${l?button('Review','openSignal:'+l.id+':'+e.id):''}</div>`).join('')||'<div class="empty">No new signals awaiting review.</div>'}</div>`;}
 
 function analyzeFinancialTrends(c){
@@ -1591,20 +2137,34 @@ function exportCreditWorkbook(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sheet2Rows),'Financial_Statements_SGD');
 
   const reqAmt=l?(isDisclosed(l)?num(l.disclosure?.amount):num(l.application?.requested)):0;
-  const mix=typeof getProductMixBreakdown==='function'&&l?getProductMixBreakdown(l):[];
-  const sched=!l||isDisclosed(l)?[]:withLoan(l,()=>loan().slice(0,12));
-  const sheet3Rows=[
-    ['DBS IBG Multi-Product Credit Facility Recommendation',l?.id||'N/A',l?.title||'Proposed Facility'],
-    ['Borrower',c.profile.name,'Total Quantum (SGD)',reqAmt,'Status',l?.status||'Draft'],
-    ['Collateral / Security',l?.application?.collateral||'N/A'],
-    [],
-    ['Component Product','Share %','Allocation (SGD)','Indicative Pricing','Tenor / Purpose'],
-    ...mix.map(x=>[x.product,x.pct+'%',x.amount,x.pricing,x.tenorNote]),
-    [],
-    ['First 12 Months Projected Term Debt Schedule (Month)','Principal (SGD)','Interest (SGD)','Total Payment (SGD)','Closing Balance (SGD)'],
-    ...sched.map(r=>[r.month,Number(r.principal.toFixed(2)),Number(r.interest.toFixed(2)),Number(r.payment.toFixed(2)),Number(r.balance.toFixed(2))])
-  ];
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sheet3Rows),'MultiProduct_Loan_Structure');
+  let sheet3Rows;
+  if(isTiongWoonRcf(l)){
+    const st=twcRcfState(l),m=twcRcfMetrics(st);
+    sheet3Rows=[
+      ['DBS IBG Secured Receivables Revolving Credit Line Proposal',l.id,l.title],
+      ['Borrower',c.profile.name,'Proposed Ceiling (SGD)',TWC_RCF_LIMIT,'Tenor','12 months (review before renewal)'],
+      ['Indicative Pricing','3M Compounded SORA ('+st.sora.toFixed(2)+'%) + 1.50% p.a.','Eligible Invoices (SGD)',m.eligibleTotal,'75% Borrowing Base (SGD)',m.borrowingBase],
+      ['Recommended Limit (SGD)',m.supportable,'Baseline Peak Gap (SGD)',m.baseline.peak,'Security & Repayment',l.application?.collateral||'N/A'],
+      [],
+      ['Scenario Date','Reference','Project / Cash Flow','Cash In (SGD)','Cash Out (SGD)','Net Cash Before DBS Line (SGD)'],
+      ...m.stress.entries.map(r=>[twcRcfDate(r.day),r.reference,r.summary,Number(r.inflow.toFixed(2)),Number(r.outflow.toFixed(2)),Number(r.balance.toFixed(2))])
+    ];
+  }else{
+    const mix=typeof getProductMixBreakdown==='function'&&l?getProductMixBreakdown(l):[];
+    const sched=!l||isDisclosed(l)?[]:withLoan(l,()=>loan().slice(0,12));
+    sheet3Rows=[
+      ['DBS IBG Multi-Product Credit Facility Recommendation',l?.id||'N/A',l?.title||'Proposed Facility'],
+      ['Borrower',c.profile.name,'Total Quantum (SGD)',reqAmt,'Status',l?.status||'Draft'],
+      ['Collateral / Security',l?.application?.collateral||'N/A'],
+      [],
+      ['Component Product','Share %','Allocation (SGD)','Indicative Pricing','Tenor / Purpose'],
+      ...mix.map(x=>[x.product,x.pct+'%',x.amount,x.pricing,x.tenorNote]),
+      [],
+      ['First 12 Months Projected Term Debt Schedule (Month)','Principal (SGD)','Interest (SGD)','Total Payment (SGD)','Closing Balance (SGD)'],
+      ...sched.map(r=>[r.month,Number(r.principal.toFixed(2)),Number(r.interest.toFixed(2)),Number(r.payment.toFixed(2)),Number(r.balance.toFixed(2))])
+    ];
+  }
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sheet3Rows),isTiongWoonRcf(l)?'Facility_Structure_RCF':'MultiProduct_Loan_Structure');
 
   const qual=typeof computeQualitativeModel==='function'&&l?computeQualitativeModel(l,c):null;
   const memo=typeof buildCreditCommitteeMemo==='function'&&l?buildCreditCommitteeMemo(l,c):null;
@@ -2180,7 +2740,7 @@ function computeQualitativeModel(l,c){
     {c:'Operating Conditions',score:scoreCond,note:`Current ratio ${times(cr)}; ${sigHigh} high-priority market/FX signals active across ${[...new Set((c.deps||[]).map(d=>d.country))].length||1} jurisdictions.`}
   ];
   const indMap={
-    twc:{rivalry:'Moderate · Heavy-Lift Niche & Mega-Tonnage Scale',rivNote:'Ranked #15 globally on IC100 Crane Index (up to 2,200t single lift), serving Changi T5, oil/gas & semiconductor projects across Singapore, Saudi Arabia, India & Thailand.',sup:'Moderate · Specialized Crane OEMs (Liebherr / XCMG)',supNote:'Long-lead heavy crawler & all-terrain crane fabrication balanced across European (Liebherr) and Asian (XCMG / Zoomlion) OEMs with milestone-gated drawdowns.',buy:'Diversified · Sovereign EPCs & Blue-Chip Petrochem',buyNote:'Exposure across Singapore civil authorities, petrochemical complexes & Saudi Aramco contractors; monitored for 118-day collection cycle.',sub:'Low · Irreplaceable Mega-Lift Engineering',subNote:'Super-heavy PPVC modular housing and refinery reactor lifts cannot substitute away from high-capacity crawler cranes and SPMT haulage.',ent:'High Barriers · Fleet Capex, Waterfront Jetty & MOM Safety',entNote:'15 Pandan Crescent private waterfront jetty, S$400M+ crane fleet replacement value, Gold Best Managed Board & MOM licences create formidable moats.',esgTier:'MAS Taxonomy: Amber-to-Green Low-Emission Crane Transition',esgBenefit:'Replacing ageing diesel units with Stage-V / hybrid cranes trims Scope 1 diesel fuel burn at Changi T5 & Pandan Crescent; verified green fleet mix unlocks -5 bps SLL step-down.'},
+    twc:{rivalry:'Moderate · Heavy-Lift Expertise & >S$40m Project Pipeline',rivNote:'Integrated heavy-lift and engineering services across semiconductor, public infrastructure and biopharmaceutical projects (>S$40m Feb 2026 project announcement). Weaknesses/Threats: 600+ cranes at 57% utilisation (FY2026) and ~S$12m (~6% revenue) cross-hiring during overlapping schedules.',sup:'Moderate · Specialist Components & Rigging Suppliers',supNote:'Supplier pricing can embed indirect FX exposure (e.g. CNY PO linked 25% to USD steel benchmark) requiring invoice-level FX stress and human review.',buy:'Mixed Project Payment Cycles (~86d DSO vs ~21d DPO)',buyNote:'Working capital gap (~65 days; Note 14 net trade receivables S$44.294m vs payables S$6.341m) supported by assigning certified, undisputed invoices into a designated DBS collection account (75% borrowing base).',sub:'Low · Specialist Heavy-Lift & Integrated Engineering',subNote:'Integrated heavy-lift engineering delivers stronger margins than crane rental alone (FY2026 GPM 40.7%).',ent:'High Barriers · Fleet Scale, Digital Planning & Safety Controls',entNote:'600+ crane fleet, digital fleet scheduling to cut avoidable cross-hiring, and verified 9.5% net gearing support conditional S$3m RCF capacity.',esgTier:'Sustainable Operational Growth · Digital & Efficient Fleet Priorities',esgBenefit:'Tiong Woon 2025 Sustainability Report prioritises digital planning technology and environmentally efficient fleet management, helping curb avoidable cross-hiring (~S$12m), unnecessary fleet moves and fuel burn (illustrative SLL/efficiency context, not verified CO2 reduction).'},
     cdg:{rivalry:'Moderate · Regulated Concessions',rivNote:'Public bus & rail routes operate under multi-year LTA Singapore, TfL London & Greater Manchester franchises.',sup:'Moderate-High · Zero-Emission OEMs',supNote:'Dedicated electric bus chassis lead times (Wrightbus) mitigated via 2-week parts buffer & multi-supplier qualification.',buy:'Concentrated · Government Transit Authorities',buyNote:'LTA & TfL represent sovereign-backed contract counterparties with low default risk and inflation-indexed fee structures.',sub:'Low-Moderate · Multimodal Urban Integration',subNote:'Integrated rail/bus/taxi network insulates against single-mode commuter switching.',ent:'High Barriers · Capital & Licensing Moats',entNote:'Rail operating concessions and depot electrification infrastructure create durable competitive moats.',esgTier:'MAS Taxonomy: Green Clean Transport',esgBenefit:'Zero-emission electric buses & autonomous shuttles directly abate tailpipe Scope 1 emissions; verified deliveries unlock -5 bps SLL margin ratchet.'},
     sats:{rivalry:'Moderate · Duopoly/Hub Concentration',rivNote:'Dominant Changi Airport ground & inflight catering incumbent; WFS creates #1 global air cargo handler scale.',sup:'Moderate · Specialized Apron GSE OEMs',supNote:'Electric tow-tractor lead times (TLD Group) & Coldport refrigeration OEMs require milestone-gated Tranche releases.',buy:'High Concentration · Airlines (SIA 28%)',buyNote:'Long-term hub handling contracts with Singapore Airlines & DHL Pharma provide predictable recurring cargo yields.',sub:'Low · Irreplaceable Airside Infrastructure',subNote:'On-apron licences, CEIV Pharma cool-rooms and T5 capacity cannot be bypassed by off-airport handlers.',ent:'Very High Barriers · Aviation Security & Hub Slots',entNote:'CAAS licensing and Changi airside slots establish high barriers to entry.',esgTier:'MAS Taxonomy: Green Aviation Ground Ops',esgBenefit:'Electrifying apron tow tractors & Coldport HVAC aligns with CAAS Sustainable Air Hub targets and qualifies for -5 bps SLL step-down.'},
     sci:{rivalry:'Moderate · Utility & PPA Market',rivNote:'285MWh Jurong Island BESS & long-term corporate semiconductor PPAs anchor contracted margins against wholesale pool volatility.',sup:'Moderate-High · BESS & PV Tier-1 OEMs',supNote:'Cell/inverter imports (CATL, LONGi) carry CNY/USD shipping & grid-tie test risks mitigated via holdbacks.',buy:'Investment-Grade Buyers (Micron / EMA)',buyNote:'Long-tenor renewable PPAs & EMA ancillary service contracts lock in off-take credit quality.',sub:'Low · Baseload Decarbonisation Demand',subNote:'Singapore industrial users require 24/7 green power & BESS grid firming to meet Scope 2 net-zero pledges.',ent:'High Barriers · Grid Concessions & Scale',entNote:'EMA grid interconnection approvals and multi-hundred-MW utility capex deter marginal entrants.',esgTier:'MAS Taxonomy: Amber-to-Green Utility BESS',esgBenefit:'Grid-scale energy storage enables intermittent solar integration; milestone verification triggers -5 bps SLL sustainability discount.'}
@@ -2350,13 +2910,23 @@ function governancePage(){
   const r=DB.roi||defaultRoiState();
   const co=companyById(DB.customerId)||DB.companies[0];
   const fl=companyLoans(co?.id).find(x=>!isDisclosed(x))||companyLoans(co?.id)[0];
+  const isRcf=isTiongWoonRcf(fl);
   const dc=ensureDrawdownCase(fl,co),baseCert=num(dc.baseCertifiedUnits??7),totUnits=num(dc.totalUnits??10),unitBal=num(dc.unitBalance??210000);
   const baseHold=Math.max(0,(totUnits-baseCert)*unitBal),revHold=Math.max(0,(totUnits-(baseCert+1))*unitBal),revRel=Math.max(0,num(dc.trancheRequested)-revHold);
   const wkCost=num(dc.weeklyExtraCostPerUnit??14000),wks=num(dc.delayWeeks??3);
   const baseCost=Math.round((totUnits-baseCert)*wkCost*wks),revCost=Math.max(0,Math.round((totUnits-(baseCert+1))*wkCost*wks));
   const f0=co?.financials?.[0]?.year||'2024',f1=co?.financials?.at(-1)?.year||'2026';
   const revTag=dc.cert2Asset?dc.cert2Asset.replace(/CRN-TW-0?/,'Crane #').replace(/CHG-WL-/,'Charger #'):'Revised Cert';
-  const aiAudits=scopedAuditRows().filter(a=>/AI|Token|SoD|CFO|Maker|Mitigation|Credit|CSA/i.test(a.action)||/AI|Token|CFO|Credit|CSA/i.test(a.actor));
+  const aiAudits=scopedAuditRows().filter(a=>/AI|Token|SoD|CFO|Maker|Mitigation|Credit|CSA|TWC-RCF|clause|assignment|delay/i.test(a.action)||/AI|Token|CFO|Credit|CSA|Demo/i.test(a.actor));
+  const problemRow=isRcf
+    ?'Unverified invoices, prior assignments, delayed USD receipts (+20d) & hidden CNY/USD steel clauses distort cash sizing.'
+    :'Unverified cranes or wrong site notices delay draws or cause missed holds across global operations.';
+  const innovRow=isRcf
+    ?'Map event → FX timing offset (USD 100k → 400k exposed) → dated Cash Stress (+S$402k peak gap) → 75% borrowing base check.'
+    :`Adding ${E(revTag)} shifts holdback live (${money(baseHold,true)} → ${money(revHold,true)}) and cuts delay cost (${money(baseCost,true)} → ${money(revCost,true)}).`;
+  const liveProofRow=isRcf
+    ?'Full TWC-RCF-2026 flow: Map → FX Hedge & Indirect Steel Clause → Dated Cash Forecast → 75% Drawdown Check.'
+    :'Full walkthrough: opening hold → filter old news → add pass cert → DT+ sign-off.';
   return pageIntro('Business Impact & AI Safeguards',`Measured value, competitor gap vs. DBS Joy, and safety rules for ${co.profile.name}.`,button('Export audit trail','backup'))+
   `<section class="card"><h2>1. DBS IBG Business Impact Calculator</h2><p class="small muted">Adjust team assumptions to estimate hours and cost saved across loan reviews.</p>
     <form id="roiForm"><div class="forms">
@@ -2371,35 +2941,35 @@ function governancePage(){
   </section>
   <section class="card"><h2>2. Why IDEAL Lens Goes Beyond DBS Joy &amp; Market Tools</h2>
     <div class="tablewrap"><table class="gov-table"><thead><tr><th>Tool</th><th>What Already Exists</th><th>What IDEAL Lens Adds</th></tr></thead><tbody>
-      <tr><td><strong>DBS Joy &amp; DBS IDEAL</strong></td><td>Joy answers servicing questions; IDEAL lets clients upload documents and draw down revolving lines.</td><td>Connects incoming site notices and pass certs straight to clause holdbacks and cash impact before release.</td></tr>
-      <tr><td><strong>Built / Rabbet / Everstream / Moody’s</strong></td><td>US construction draw tools check invoices; risk platforms score suppliers or credit ratings separately.</td><td>Brings borrower + DBS together on one screen: 1 pass cert updates holdback, delay cost, and Digital Token+ approval live.</td></tr>
-      <tr><td><strong>Fake &amp; Old News Protection</strong></td><td>AI summaries can mistake old articles or wrong sites for active project delays.</td><td>Fixed math rules compute every dollar; old news (${E(dc.staleDoc?.label||'2023 Mammoet Thailand')}) and wrong sites (${E(dc.wrongSiteDoc?.label||'TWC Arabia Jubail')}) are blocked with zero hold change.</td></tr>
+      <tr><td><strong>DBS Joy &amp; DBS IDEAL</strong></td><td>Joy answers servicing questions; IDEAL lets clients upload documents and draw down revolving lines.</td><td>Connects Map events, FX natural-hedge timing, indirect supplier clauses &amp; 75% borrowing base eligibility directly into one credit &amp; cash decision.</td></tr>
+      <tr><td><strong>Built / Rabbet / Everstream / Moody’s</strong></td><td>Draw tools check construction budgets; risk tools score countries separately without transaction-level cash links.</td><td>Matches receipts to payments only when currency, entity access &amp; timing qualify, while holding country-only news in a review state.</td></tr>
+      <tr><td><strong>Human-Review &amp; Deterministic Math Guardrails</strong></td><td>LLMs can hallucinate FX adjustments or misclassify historical releases as active invoice disruptions.</td><td>Fixed deterministic formulas compute borrowing base, netting &amp; cash gaps; AI/rule extraction requires human confirmation before applying clause changes.</td></tr>
     </tbody></table></div>
   </section>
   <section class="card"><h2>3. 90-Day DBS IBG Pilot Plan (${E(co.profile.name)} Example)</h2>
-    <p class="tiny muted">Tracks 4 simple metrics across 25–50 equipment &amp; project drawdowns against manual email review.</p>
+    <p class="tiny muted">Tracks 4 measurable KPIs across working-capital receivables &amp; FX-linked drawdowns vs manual email/spreadsheet checks.</p>
     <div class="tablewrap"><table class="credit-table"><thead><tr><th>Pilot Metric</th><th>Manual Process</th><th>With IDEAL Lens</th><th>How DBS Verifies It</th></tr></thead><tbody>
-      <tr><td><strong>Time per Drawdown Check</strong></td><td>~4.5 hrs (email &amp; Excel chase)</td><td><strong>~45 mins</strong> (AI match + fixed rules)</td><td>Timestamped log from document arrival to DT+ sign-off</td></tr>
-      <tr><td><strong>Unit Exceptions Caught</strong></td><td>Ad-hoc email check</td><td><strong>${baseCert}/${totUnits} matched (${money(baseHold,true)} hold)</strong></td><td>Discrepancies caught before funds leave DBS</td></tr>
-      <tr><td><strong>Unnecessary Full Freezes Avoided</strong></td><td>Whole tranche frozen</td><td><strong>Partial release (${money(revRel,true)})</strong></td><td>Safe partial draws approved under Clause 4.2A</td></tr>
-      <tr><td><strong>Cost per Drawdown Review</strong></td><td>~S$405 / check</td><td><strong>~S$68 / check</strong></td><td>Saved RM/ops hours plus avoided sub-hire delay cost</td></tr>
+      <tr><td><strong>Time per Drawdown &amp; FX Check</strong></td><td>~4.5 hrs (email &amp; Excel chase)</td><td><strong>~45 mins</strong> (AI clause/event triage + fixed rules)</td><td>Timestamped audit log from notice upload to limit recalculation</td></tr>
+      <tr><td><strong>Receivables &amp; Documentation Control</strong></td><td>Manual invoice check</td><td><strong>${isRcf?'S$4.0m eligible → S$3.0m base (75%)':baseCert+'/'+totUnits+' matched ('+money(baseHold,true)+' hold)'}</strong></td><td>${isRcf?'Prior-assigned invoice (AR-SGD-02) excluded immediately with exact cure/repay figure':'Discrepancies caught before funds leave DBS'}</td></tr>
+      <tr><td><strong>Indirect &amp; Timing FX Visibility</strong></td><td>Spreadsheet end-of-month</td><td><strong>${isRcf?'0–90d netting + 25% steel clause':'Partial release ('+money(revRel,true)+')'}</strong></td><td>${isRcf?'Delayed receipt shifts natural offset &amp; SGD peak gap live':'Safe partial draws approved under Clause 4.2A'}</td></tr>
+      <tr><td><strong>Cost per Review</strong></td><td>~S$405 / check</td><td><strong>~S$68 / check</strong></td><td>Saved RM/treasury ops hours plus avoided excess drawings</td></tr>
     </tbody></table></div>
   </section>
   <section class="card"><h2>4. MAS FEAT &amp; PDPA Guardrails</h2>
     <div class="feat-grid">
       <div class="ai-finding"><strong>Fair &amp; Objective</strong><p>Uses audited cash flow and matched peer periods (${E(co.benchmarks?.[0]?.name||'SGX peer')}) instead of black-box scores.</p></div>
       <div class="ai-finding"><strong>Data Privacy (PDPA)</strong><p>Uploaded Excel files stay inside the browser; only public company names query news sources.</p></div>
-      <div class="ai-finding"><strong>Human Sign-Off Only</strong><p>AI never releases money on its own — Finance Maker, CFO, Dual CSA Admins, and DBS Bank approve every step.</p></div>
-      <div class="ai-finding"><strong>Source-Linked Proof</strong><p>Every figure cites FY${E(f0)}–FY${E(f1)} filings and clearly tags sample simulations.</p></div>
+      <div class="ai-finding"><strong>Human Sign-Off Only</strong><p>AI never releases money or confirms contract clauses on its own — Finance Maker, CFO, Dual CSA Admins, and DBS Bank approve every step.</p></div>
+      <div class="ai-finding"><strong>Source-Linked Proof</strong><p>Every figure cites FY${E(f0)}–FY${E(f1)} filings and clearly labels illustrative demo flows.</p></div>
     </div>
   </section>
   <section class="card"><h2>5. Rubric &amp; Pitch Alignment</h2>
     <div class="tablewrap"><table class="credit-table"><thead><tr><th>Criterion (30m each)</th><th>Live Proof on ${E(co.profile.name)}</th><th>Open Screen</th></tr></thead><tbody>
-      <tr><td><strong>1. Problem</strong></td><td>Unverified cranes or wrong site notices delay draws or cause missed holds across global operations.</td><td>${button('1. Drawdown Check','caseTab:tranches',true)}</td></tr>
-      <tr><td><strong>2. Innovation</strong></td><td>Adding ${E(revTag)} shifts holdback live (${money(baseHold,true)} → ${money(revHold,true)}) and cuts delay cost (${money(baseCost,true)} → ${money(revCost,true)}).</td><td>${button('Test Pass Cert','caseTab:tranches')}</td></tr>
+      <tr><td><strong>1. Problem</strong></td><td>${problemRow}</td><td>${button('1. Drawdown Check','caseTab:tranches',true)}</td></tr>
+      <tr><td><strong>2. Innovation</strong></td><td>${innovRow}</td><td>${button(isRcf?'2. FX & Clause Lab':'Test Pass Cert',isRcf?'caseTab:fx':'caseTab:tranches')}</td></tr>
       <tr><td><strong>3. Business Impact</strong></td><td>90-day pilot scorecard + Part I FY${E(f0)}–FY${E(f1)} ratios &amp; Excel pack.</td><td>${button('Financials & Excel','go:documents')}</td></tr>
-      <tr><td><strong>4. Risk &amp; Ethics</strong></td><td>Maker-Checker DT+, Dual CSA controls, fraud IBAN lock &amp; stale/wrong-site news filter.</td><td>${button('Controls & CSA','go:csa')}</td></tr>
-      <tr><td><strong>5. Live Prototype</strong></td><td>Full Tiong Woon flow: opening hold → filter old news → add pass cert → DT+ sign-off.</td><td>${button('Cash Stress Lab','caseTab:planner')}</td></tr>
+      <tr><td><strong>4. Risk &amp; Ethics</strong></td><td>Maker-Checker DT+, Dual CSA controls, prior-assignment block &amp; clause review gate.</td><td>${button('Controls & CSA','go:csa')}</td></tr>
+      <tr><td><strong>5. Live Prototype</strong></td><td>${liveProofRow}</td><td>${button('3. Cash Stress Lab','caseTab:planner')}</td></tr>
     </tbody></table></div>
   </section>
   <section class="card"><div class="row between"><h2>6. Recent Sign-Off Ledger</h2><span class="tag green">${aiAudits.length} verified events</span></div>
@@ -2459,12 +3029,12 @@ function idealCashExceptionCard(c){
     <div class="ai-uncertainty"><strong>Explicit Treasury Control &amp; Uncertainty Boundary:</strong> 14-day op-ex floor uses a 72% revenue cost proxy, MT940 matching reflects deterministic counterparty-alias confidence (91%), and 2.85% p.a. SORA sweep yield is indicative. High-value sweeps (&gt; single CFO CSA limit) enforce Dual Board Mandate Digital Token+ co-signatory verification.</div>
   </section>`;
 }
-function customerHome(){const c=companyById(DB.customerId),loans=companyLoans(c.id),active=loans.filter(l=>l.status==='Disbursed'),pending=loans.filter(l=>!['Disbursed','Draft'].includes(l.status)),cfoPending=loans.filter(l=>l.status==='Pending CFO approval'),drafts=loans.filter(l=>l.status==='Draft'),signals=pendingSignals([c]),watched=loans.filter(l=>covenantSummary(l).breaches.length),csa=activeCsa(c),csaScan=scanCsaAnomalies(csa),conn=c.idealConnect=ensureConnectDefaults(c.idealConnect,c);const csaActionBar=isCustomerAdmin()?`<div class="mc-bar" style="border-left-color:${csaScan.issues.length?'#c8102e':'#059669'}"><div><strong>Admin Controls · Score ${csaScan.score}/100</strong><p class="tiny muted" style="margin:3px 0 0">${csaScan.issues.length?`${csaScan.issues.length} conflict(s) detected. `:''}Dual-Admin: ${csa.dualAdmin?'On':'Off'} · API rotated ${E(stamp(conn.keyRotatedAt))}.</p></div><div class="row">${button(csaScan.issues.length?'Fix Controls':'Manage Controls','go:csa',true)}</div></div>`:'';return pageIntro('Business overview',c.profile.name,`<div class="row">${isCustomerMaker()?button('Apply for Loan','newApplication',true):button('Controls','go:csa')}${button('3-Step Pitch Tour','startGuidedTour:judge')}</div>`)+statGrid([['Active Facilities',active.length,'Company records'],['Outstanding',active.some(l=>!isDisclosed(l))?money(active.reduce((n,l)=>n+(loanBalance(l)??0),0),true):'Undisclosed','Current balances'],['In Review',pending.length,cfoPending.length+' pending CFO DT+ · '+drafts.length+' drafts'],['Alerts / Controls',signals.length+' / '+csaScan.score+'%',csaScan.issues.length?csaScan.issues.length+' control note':'Checks ready']])+csaActionBar+(cfoPending.length&&!isCustomerAdmin()?`<div class="mc-bar"><div><strong>Action Needed (${E(cfoPending[0].id)} · ${money(cfoPending[0].application.requested,true)})</strong><p class="tiny muted" style="margin:3px 0 0">${E(cfoPending[0].title)} is ready for CFO Digital Token+ approval.</p></div><div class="row">${button('Open Loan','openCase:'+cfoPending[0].id,true)}${isCustomerMaker()?button('Switch to CFO','persona:CFO / Approver'):''}</div></div>`:'')+`<div class="dashboard-grid"><section class="card"><div class="row between"><h2>Loans &amp; Applications</h2>${button('View all','go:loans')}</div>${caseTable(loans.slice(0,4),true)}</section><section class="card"><h2>Safety Limits</h2>${active.map(l=>{const p=nextPayment(l);return p?`<div class="payment-row"><div><strong>${E(l.title)}</strong><small>${E(p.date)}</small></div><strong>${money(p.amount)}</strong></div>`:'';}).join('')||'<p class="muted small">Check active loan covenants and cash coverage below.</p>'}<div class="divider"></div><p class="small">${watched.length?watched.length+' facilities need review.':loans.some(l=>isDisclosed(l)||covenantSummary(l).values.some(v=>v.actual===null))?'Select a facility below to inspect live covenants.':'All current ratios are within limits.'}</p>${loans.filter(l=>l.status!=='Draft').slice(0,3).map(l=>`<div class="compact-item"><span>${E(l.title)}</span>${button('Open Limits','openCovenants:'+l.id)}</div>`).join('')}</section></div><details class="clean-collapse"><summary>Cash Exceptions (${Object.keys(c.stagedExceptions||{}).length} item)</summary><div class="clean-collapse-body">${idealCashExceptionCard(c)}</div></details><details class="clean-collapse"><summary>Partner Alerts (${signals.length} pending)</summary><div class="clean-collapse-body"><div class="row between" style="margin-bottom:10px"><span class="tiny muted">Public news linked to suppliers &amp; customers</span>${button('Open Map','customerExposure')}</div>${signalList(signals,3)}</div></details><details class="clean-collapse"><summary>Financial Summary (${E(c.profile.name)})</summary><div class="clean-collapse-body">${companySnapshotCard(c)}</div></details><section class="profile-reminder"><div><strong>Company Profile &amp; Sign-Off</strong><p>${c.confirmed?'CFO approved':'Review pending'} · FY${E(c.financials.at(-1).year)} · ${c.deps.length} partners</p></div>${button('Edit Profile','go:profile')}</section>`;}
+function customerHome(){const c=companyById(DB.customerId),loans=companyLoans(c.id),active=loans.filter(l=>l.status==='Disbursed'),pending=loans.filter(l=>!['Disbursed','Draft'].includes(l.status)),cfoPending=loans.filter(l=>l.status==='Pending CFO approval'),drafts=loans.filter(l=>l.status==='Draft'),signals=pendingSignals([c]),watched=loans.filter(l=>covenantSummary(l).breaches.length),csa=activeCsa(c),csaScan=scanCsaAnomalies(csa),conn=c.idealConnect=ensureConnectDefaults(c.idealConnect,c);const csaActionBar=isCustomerAdmin()?`<div class="mc-bar" style="border-left-color:${csaScan.issues.length?'#c8102e':'#059669'}"><div><strong>Admin Controls · Score ${csaScan.score}/100</strong><p class="tiny muted" style="margin:3px 0 0">${csaScan.issues.length?`${csaScan.issues.length} conflict(s) detected. `:''}Dual-Admin: ${csa.dualAdmin?'On':'Off'} · API rotated ${E(stamp(conn.keyRotatedAt))}.</p></div><div class="row">${button(csaScan.issues.length?'Fix Controls':'Manage Controls','go:csa',true)}</div></div>`:'';return pageIntro('Business overview',c.profile.name,`<div class="row">${isCustomerMaker()?button('Apply for Loan','newApplication',true):button('Controls','go:csa')}${button('3-Step Pitch Tour','startGuidedTour:judge')}</div>`)+statGrid([['Active Facilities',active.length,'Company records'],['Outstanding',active.some(l=>!isDisclosed(l))?money(active.reduce((n,l)=>n+(loanBalance(l)??0),0),true):'Undisclosed','Current balances'],['In Review',pending.length,cfoPending.length+' pending CFO DT+ · '+drafts.length+' drafts'],['Alerts / Controls',signals.length+' / '+csaScan.score+'%',csaScan.issues.length?csaScan.issues.length+' control note':'Checks ready']])+csaActionBar+(cfoPending.length&&!isCustomerAdmin()?`<div class="mc-bar"><div><strong>Action Needed (${E(cfoPending[0].id)} · ${money(cfoPending[0].application.requested,true)})</strong><p class="tiny muted" style="margin:3px 0 0">${E(cfoPending[0].title)} is ready for CFO Digital Token+ approval.</p></div><div class="row">${button('Open Loan','openCase:'+cfoPending[0].id,true)}${isCustomerMaker()?button('Switch to CFO','persona:CFO / Approver'):''}</div></div>`:'')+`<div class="dashboard-grid"><section class="card"><div class="row between"><h2>Loans &amp; Applications</h2>${button('View all','go:loans')}</div>${caseTable(loans.slice(0,4),true)}</section><section class="card"><h2>Safety Limits</h2>${active.map(l=>{const p=nextPayment(l);return p?`<div class="payment-row"><div><strong>${E(l.title)}</strong><small>${E(p.date)}</small></div><strong>${money(p.amount)}</strong></div>`:'';}).join('')||'<p class="muted small">Check active loan covenants and cash coverage below.</p>'}<div class="divider"></div><p class="small">${watched.length?watched.length+' facilities need review.':loans.some(l=>isDisclosed(l)||isTiongWoonRcf(l)||covenantSummary(l).values.some(v=>v.actual===null))?'Select a facility below to inspect live borrowing base or covenants.':'All current ratios are within limits.'}</p>${loans.filter(l=>l.status!=='Draft').slice(0,3).map(l=>`<div class="compact-item"><span>${E(l.title)}</span>${button(isTiongWoonRcf(l)?'Check Borrowing Base':'Open Limits','openCovenants:'+l.id)}</div>`).join('')}</section></div><details class="clean-collapse"><summary>Cash Exceptions (${Object.keys(c.stagedExceptions||{}).length} item)</summary><div class="clean-collapse-body">${idealCashExceptionCard(c)}</div></details><details class="clean-collapse"><summary>Partner Alerts (${signals.length} pending)</summary><div class="clean-collapse-body"><div class="row between" style="margin-bottom:10px"><span class="tiny muted">Public news linked to suppliers &amp; customers</span>${button('Open Map','customerExposure')}</div>${signalList(signals,3)}</div></details><details class="clean-collapse"><summary>Financial Summary (${E(c.profile.name)})</summary><div class="clean-collapse-body">${companySnapshotCard(c)}</div></details><section class="profile-reminder"><div><strong>Company Profile &amp; Sign-Off</strong><p>${c.confirmed?'CFO approved':'Review pending'} · FY${E(c.financials.at(-1).year)} · ${c.deps.length} partners</p></div>${button('Edit Profile','go:profile')}</section>`;}
 function loansPage(){const all=visibleLoans(),query=listSearch.toLowerCase(),loans=all.filter(l=>(listStatus==='All stages'||(isDisclosed(l)?listStatus==='Public disclosure':l.status===listStatus))&&(regionFilter==='All regions'||!isAnalyst()||l.region===regionFilter)&&[l.id,l.title,companyById(l.companyId).profile.name,l.owner].join(' ').toLowerCase().includes(query));return pageIntro(isAnalyst()?'Loans & applications':'My loans','Open a facility to review its application, exposure and financing assumptions.',isCustomerMaker()?button('New application','newApplication',true):'')+`<section class="card"><div class="filter-bar"><label class="field">Search<input id="loanSearch" value="${E(listSearch)}" placeholder="Company, reference or facility"></label><label class="field">Application stage<select id="loanStatus">${['All stages','Public disclosure',...STAGES.filter(s=>!isAnalyst()||!['Draft','Pending CFO approval'].includes(s))].map(s=>`<option ${s===listStatus?'selected':''}>${E(s)}</option>`).join('')}</select></label><span class="tiny muted">${loans.length} of ${all.length} facilities</span></div>${caseTable(loans)}</section>`;}
 function inboxPage(){const items=pendingSignals().filter(x=>inboxFilter!=='Priority only'||x.event.priority==='High').sort((a,b)=>(b.event.priority==='High')-(a.event.priority==='High'));return pageIntro('Portfolio news inbox','Potential developments across declared counterparties, grouped by borrower.',button(scanBusyId?'Scanning…':'Scan portfolio','scanPortfolio',true,scanBusyId?'disabled':''))+`<section class="card"><div class="row between"><h2>Awaiting review</h2><select id="inboxPriority" aria-label="Signal priority"><option>All priorities</option><option ${inboxFilter==='Priority only'?'selected':''}>Priority only</option></select></div>${signalList(items,50)}</section><p class="tiny muted">Opening a signal takes you to the borrower’s loan review. Relevance, evidence and analyst notes remain together in that case.</p>`;}
 function profilePage(){const c=companyById(profileId||DB.customerId),p=c.profile;const tabs=[['details','Company details'],['financials','Financial documents'],['relationships','Business relationships']];return pageIntro('Company profile',p.name,isAnalyst()?button('All companies','go:clients'):'')+`<div class="tabs" role="navigation" aria-label="Company profile sections">${tabs.map(([k,l])=>button(l,'profileTab:'+k,profileTab===k)).join('')}</div>`+(profileTab==='details'?`<form id="profileV3"><section class="card"><div class="row between"><h2>Company information</h2>${tag('Shared across applications','neutral')}</div><div class="forms">${field('Legal company name','name',p.name,'text','required maxlength="150"')}${field('Registration number / UEN','uen',p.uen||'','text','maxlength="40"')}${countryField('Country','country',p.country)}${field('Industry','industry',p.industry,'text','required maxlength="120"')}${field('Registered office / operating site','location',p.location||'','text','required maxlength="250"')}${field('Finance contact','contact',p.contact||'','text','maxlength="120"')}${field('Contact email','email',p.email||'','email','maxlength="180"')}${field('Latitude','lat',p.lat??'','number','min="-90" max="90" step="any"')}${field('Longitude','lon',p.lon??'','number','min="-180" max="180" step="any"')}</div><p class="tiny muted">Company information fills new applications automatically. Each new financing purpose, amount and project budget is entered separately.</p>${countryList()}<div class="row"><button class="primary">Save company profile</button>${button('Find site coordinates','geocodeBorrower')}</div><div id="locationResults"></div></section></form>`:profileTab==='financials'?stripHead(documentsV2()):`<section class="card"><h2>Declared business relationships</h2><p class="small muted">These company-level relationships are reused in the exposure view of each facility.</p></section>`+relationshipSection());}
-function applicationPage(){if(!activeLoan())return loansPage();if(isDisclosed(activeLoan()))return caseFrame();const l=activeLoan(),c=S.company,co=activeCompany(),canEditFields=['Draft','Information requested','Pending CFO approval'].includes(l.status)&&isCustomerMaker(),canSubmitStage=['Draft','Information requested','Pending CFO approval'].includes(l.status);return pageIntro(l.status==='Draft'?'Financing application':'Application details',l.id+' · '+co.profile.name,button('Back to loan','go:case'))+aiApprovalBriefingCard(l,co)+`<section class="card"><div class="row between"><h2>Applicant profile</h2>${button('Edit company profile','go:profile')}</div><div class="profile-summary"><div><span>Legal company</span><strong>${E(co.profile.name)}</strong></div><div><span>Industry</span><strong>${E(co.profile.industry)}</strong></div><div><span>Country / registration</span><strong>${E(co.profile.country)} · ${E(co.profile.uen||'Registration not entered')}</strong></div><div><span>Financials</span><strong>${E(co.financials.at(-1).year)} · ${co.confirmed?'CFO Attested':'Review pending'}</strong></div></div><p class="tiny muted">Filled from Company profile. Maker-Checker controls separate preparation from binding Digital Token+ submission.</p></section><form id="applicationV3" novalidate><fieldset ${!canEditFields?'disabled':''}><section class="card"><h2>New financing request</h2><div class="forms">${field('Facility / application title','title',l.title,'text','maxlength="150"')}${select('Proposed structure','product',PRODUCTS,l.terms.product)}${textarea('Growth opportunity','growth',c.growth,'maxlength="1500"')}${textarea('Financing purpose','purpose',c.purpose,'maxlength="1500"')}${field('Requested facility · SGD','requested',c.requested,'number','min="0" max="1000000000000" step="any"')}${field('Tenor · years','years',l.terms.years,'number','min="1" max="15" step="0.5"')}</div></section><section class="card"><h2>Project funding</h2><div class="forms">${field('Base project cost · SGD','project',c.project,'number','min="0" max="1000000000000" step="any"')}${field('Contingency allowance · SGD','contingency',c.contingency,'number','min="0" max="1000000000000" step="any"')}${field('Initial working capital · SGD','workingCapital',c.workingCapital,'number','min="0" max="1000000000000" step="any"')}${field('Internal funding · SGD','equityFunding',c.equityFunding,'number','min="0" max="1000000000000" step="any"')}${field('Usable existing facility · SGD','availableFacility',c.availableFacility,'number','min="0" max="1000000000000" step="any"')}${textarea('Basis for contingency and working capital','bufferReason',c.bufferReason,'maxlength="2000"')}${textarea('Explanation of any remaining funding difference','amountReason',c.amountReason,'maxlength="2000"')}</div><label class="check"><input type="checkbox" name="facilityConfirmed" ${c.facilityConfirmed?'checked':''}>Existing facility availability and permitted use confirmed</label><div class="funding-check"><div><span>Funding requirement</span><strong id="fundingGap">${money(gap())}</strong></div><div><span>Requested less requirement</span><strong id="fundingDelta">${money(fundingDifference())}</strong></div></div><p class="tiny muted">Allowances should be excluded from the base cost to avoid double counting. A justified buffer can form part of the request.</p></section><section class="card"><h2>Proposed security</h2>${textarea('Collateral and ownership evidence','collateral',c.collateral,'maxlength="3000"')}</section></fieldset><div class="actionbar"><p class="small muted">${isCustomerMaker()?(l.status==='Pending CFO approval'?'Routed to CFO / Approver for Digital Token+ sign-off.':'Finance Maker can save drafts and route for CFO Digital Token+ approval.'):isCustomerApprover()?(canSubmitStage?'CFO / Approver can approve and submit via DBS Digital Token+, or return to Finance Maker.':'Already submitted to DBS.'):isCustomerAdmin()?'Company Admin (CSA) cannot originate or approve loan applications (Segregation of Duties).':'Read-only bank view of applicant submission.'}</p><div class="row">${isCustomerMaker()&&['Draft','Information requested'].includes(l.status)?`<button name="intent" value="save">Save draft</button><button class="primary" name="intent" value="route">Route for CFO Approval</button>`:''}${isCustomerMaker()&&l.status==='Pending CFO approval'?button('Switch to CFO / Approver to sign off','persona:CFO / Approver',true):''}${isCustomerApprover()&&canSubmitStage?`${button('Return to Maker','returnToMaker')}${button('Approve & Submit via Digital Token+','cfoApproveSubmit',true)}`:''}</div></div></form>`;}
-function caseFrame(){const l=activeLoan();if(!l)return loansPage();const c=activeCompany();const tabs=[['tranches','Drawdown Check'],['overview','Overview'],['covenants','Covenants'],['planner','Cash Stress'],['fx','FX Hedge'],['structurer','Loan Mix'],['review','Credit Review']];const body=caseTab==='overview'?caseOverview():caseTab==='tranches'?tranchesPage(l,c):caseTab==='fx'?fxTelemetryCard(l,c):caseTab==='covenants'?covenantCureSimulatorCard(l,c):caseTab==='structurer'?multiProductStructurerPage(l,c):caseTab==='review'?caseReview():caseTab==='exposure'?exposurePage():plannerPage();return `<div class="breadcrumb"><button class="linkbtn" data-action="go:loans">${isAnalyst()?'Loans & applications':'Loans'}</button><span>/</span><span>${E(l.id)}</span></div>`+pageIntro(l.title,c.profile.name+' · '+l.id,`<div class="row">${caseStatus(l)}${button('Open Map','caseNetwork')}</div>`)+`<div class="tabs case-tabs" role="navigation" aria-label="Loan workspace">${tabs.map(([k,t])=>button(t,'caseTab:'+k,caseTab===k)).join('')}</div><div class="workbench-split"><div class="workbench-main">${body}</div><aside class="workbench-rail" aria-label="Safety Checks and Loan Limits">${preFlightGuardrailDock(l,c)}</aside></div>`;}
+function applicationPage(){if(!activeLoan())return loansPage();if(isDisclosed(activeLoan())||isTiongWoonRcf(activeLoan()))return caseFrame();const l=activeLoan(),c=S.company,co=activeCompany(),canEditFields=['Draft','Information requested','Pending CFO approval'].includes(l.status)&&isCustomerMaker(),canSubmitStage=['Draft','Information requested','Pending CFO approval'].includes(l.status);return pageIntro(l.status==='Draft'?'Financing application':'Application details',l.id+' · '+co.profile.name,button('Back to loan','go:case'))+aiApprovalBriefingCard(l,co)+`<section class="card"><div class="row between"><h2>Applicant profile</h2>${button('Edit company profile','go:profile')}</div><div class="profile-summary"><div><span>Legal company</span><strong>${E(co.profile.name)}</strong></div><div><span>Industry</span><strong>${E(co.profile.industry)}</strong></div><div><span>Country / registration</span><strong>${E(co.profile.country)} · ${E(co.profile.uen||'Registration not entered')}</strong></div><div><span>Financials</span><strong>${E(co.financials.at(-1).year)} · ${co.confirmed?'CFO Attested':'Review pending'}</strong></div></div><p class="tiny muted">Filled from Company profile. Maker-Checker controls separate preparation from binding Digital Token+ submission.</p></section><form id="applicationV3" novalidate><fieldset ${!canEditFields?'disabled':''}><section class="card"><h2>New financing request</h2><div class="forms">${field('Facility / application title','title',l.title,'text','maxlength="150"')}${select('Proposed structure','product',PRODUCTS,l.terms.product)}${textarea('Growth opportunity','growth',c.growth,'maxlength="1500"')}${textarea('Financing purpose','purpose',c.purpose,'maxlength="1500"')}${field('Requested facility · SGD','requested',c.requested,'number','min="0" max="1000000000000" step="any"')}${field('Tenor · years','years',l.terms.years,'number','min="1" max="15" step="0.5"')}</div></section><section class="card"><h2>Project funding</h2><div class="forms">${field('Base project cost · SGD','project',c.project,'number','min="0" max="1000000000000" step="any"')}${field('Contingency allowance · SGD','contingency',c.contingency,'number','min="0" max="1000000000000" step="any"')}${field('Initial working capital · SGD','workingCapital',c.workingCapital,'number','min="0" max="1000000000000" step="any"')}${field('Internal funding · SGD','equityFunding',c.equityFunding,'number','min="0" max="1000000000000" step="any"')}${field('Usable existing facility · SGD','availableFacility',c.availableFacility,'number','min="0" max="1000000000000" step="any"')}${textarea('Basis for contingency and working capital','bufferReason',c.bufferReason,'maxlength="2000"')}${textarea('Explanation of any remaining funding difference','amountReason',c.amountReason,'maxlength="2000"')}</div><label class="check"><input type="checkbox" name="facilityConfirmed" ${c.facilityConfirmed?'checked':''}>Existing facility availability and permitted use confirmed</label><div class="funding-check"><div><span>Funding requirement</span><strong id="fundingGap">${money(gap())}</strong></div><div><span>Requested less requirement</span><strong id="fundingDelta">${money(fundingDifference())}</strong></div></div><p class="tiny muted">Allowances should be excluded from the base cost to avoid double counting. A justified buffer can form part of the request.</p></section><section class="card"><h2>Proposed security</h2>${textarea('Collateral and ownership evidence','collateral',c.collateral,'maxlength="3000"')}</section></fieldset><div class="actionbar"><p class="small muted">${isCustomerMaker()?(l.status==='Pending CFO approval'?'Routed to CFO / Approver for Digital Token+ sign-off.':'Finance Maker can save drafts and route for CFO Digital Token+ approval.'):isCustomerApprover()?(canSubmitStage?'CFO / Approver can approve and submit via DBS Digital Token+, or return to Finance Maker.':'Already submitted to DBS.'):isCustomerAdmin()?'Company Admin (CSA) cannot originate or approve loan applications (Segregation of Duties).':'Read-only bank view of applicant submission.'}</p><div class="row">${isCustomerMaker()&&['Draft','Information requested'].includes(l.status)?`<button name="intent" value="save">Save draft</button><button class="primary" name="intent" value="route">Route for CFO Approval</button>`:''}${isCustomerMaker()&&l.status==='Pending CFO approval'?button('Switch to CFO / Approver to sign off','persona:CFO / Approver',true):''}${isCustomerApprover()&&canSubmitStage?`${button('Return to Maker','returnToMaker')}${button('Approve & Submit via Digital Token+','cfoApproveSubmit',true)}`:''}</div></div></form>`;}
+function caseFrame(){const l=activeLoan();if(!l)return loansPage();const c=activeCompany();if(isTiongWoonRcf(l))return tiongWoonRcfFrame(l,c);const tabs=[['tranches','Drawdown Check'],['overview','Overview'],['covenants','Covenants'],['planner','Cash Stress'],['fx','FX Hedge'],['structurer','Loan Mix'],['review','Credit Review']];const body=caseTab==='overview'?caseOverview():caseTab==='tranches'?tranchesPage(l,c):caseTab==='fx'?fxTelemetryCard(l,c):caseTab==='covenants'?covenantCureSimulatorCard(l,c):caseTab==='structurer'?multiProductStructurerPage(l,c):caseTab==='review'?caseReview():caseTab==='exposure'?exposurePage():plannerPage();return `<div class="breadcrumb"><button class="linkbtn" data-action="go:loans">${isAnalyst()?'Loans & applications':'Loans'}</button><span>/</span><span>${E(l.id)}</span></div>`+pageIntro(l.title,c.profile.name+' · '+l.id,`<div class="row">${caseStatus(l)}${button('Open Map','caseNetwork')}</div>`)+`<div class="tabs case-tabs" role="navigation" aria-label="Loan workspace">${tabs.map(([k,t])=>button(t,'caseTab:'+k,caseTab===k)).join('')}</div><div class="workbench-split"><div class="workbench-main">${body}</div><aside class="workbench-rail" aria-label="Safety Checks and Loan Limits">${preFlightGuardrailDock(l,c)}</aside></div>`;}
 function caseOverview(){const l=activeLoan(),c=activeCompany();if(isDisclosed(l))return publicFacilityOverview(l);const repDscr=ratio(latest().cfads,latest().debtService),pfModel=withLoan(l,()=>readyForModel()?model():null),pfDscr=pfModel?.baseDSCR??repDscr;const mcActions=isCustomerApprover()&&['Draft','Pending CFO approval','Information requested'].includes(l.status)?button('Approve & Submit via Digital Token+','cfoApproveSubmit',true):isCustomerMaker()&&['Draft','Information requested'].includes(l.status)?button('Continue & Route to CFO','go:application',true):isCustomerMaker()&&l.status==='Pending CFO approval'?button('Switch to CFO / Approver','persona:CFO / Approver',true):isAnalyst()?button('Review & Update case','reviewTab:decision',true):'';return statGrid([['Loan Amount',money(l.application.requested,true),l.terms.product],['Tenor',l.terms.years+' years','Rate '+l.terms.rate+'%'],['Alerts',pendingSignals([c]).length,c.deps.length+' partners'],[latest().year+' Reported DSCR',times(repDscr),'With '+l.id+': '+times(pfDscr)]])+`<div class="grid equal"><section class="card"><h2>Purpose</h2><p>${E(l.application.purpose||'Financing purpose not yet entered.')}</p><div class="divider"></div><div class="profile-summary"><div><span>Company</span><strong>${E(c.profile.name)}</strong></div><div><span>Region</span><strong>${E(l.region)}</strong></div><div><span>DBS Team</span><strong>${E(l.owner)}</strong></div><div><span>Filings</span><strong>FY${E(latest().year)}</strong></div></div><div class="row" style="margin-top:16px">${button('Drawdown Check →','caseTab:tranches',true)}${button('Application','go:application')}${button('Company Profile','go:profile')}</div></section><section class="card"><h2>Status &amp; Approvals</h2>${tracker()}${l.status==='Draft'?`<p class="small muted">Saved draft. Send to CFO to approve.</p>`:''}<div class="row" style="margin-top:12px">${mcActions}${button('Print','print')}</div></section></div><details class="clean-collapse"><summary>AI Summary (${E(l.id)})</summary><div class="clean-collapse-body">${aiApprovalBriefingCard(l,c)}</div></details><details class="clean-collapse"><summary>History (${l.statusHistory?.length||0} events)</summary><div class="clean-collapse-body">${historyTable(l)}</div></details>`;}
 function historyTable(l){return `<div class="tablewrap"><table><thead><tr><th>Updated</th><th>Stage</th><th>Customer update</th></tr></thead><tbody>${[...l.statusHistory].reverse().map(h=>`<tr><td>${E(stamp(h.time))}</td><td>${statusTag(h.status)}</td><td>${E(h.message||'')}</td></tr>`).join('')||'<tr><td colspan="3">No stage changes recorded.</td></tr>'}</tbody></table></div>`;}
 function caseReview(){const l=activeLoan(),c=activeCompany();return `<div class="subtabs" role="navigation" aria-label="Review sections">${[['financials','Financial ratios & L3'],['qualitative','Qualitative 5Cs & ESG'],['covenants','Covenants'],['monitoring','Events & assessment'],['decision',isDisclosed(l)?'Facility record':isAnalyst()?'Case decision':'Application status']].map(([k,t])=>button(t,'reviewTab:'+k,reviewTab===k)).join('')}</div>`+(reviewTab==='financials'?`<section class="card"><div class="row between"><h2>Borrower financial review</h2>${button('Open source documents','go:documents')}</div>${workbookStats()}<p class="tiny muted">These company figures are shared across facilities. A facility-specific repayment model is assessed under Stress testing.</p></section>`+level3RatioCard(c)+aiRatioAnomalyCard(c):reviewTab==='qualitative'?qualitativeRiskCard(l,c):reviewTab==='covenants'?(isDisclosed(l)?publicCovenants():covenantCureSimulatorCard(l,c)+stripHead(covenantsV2())):reviewTab==='monitoring'?caseCountryEvidence()+monitoringPage():decisionPage());}
@@ -2594,11 +3164,28 @@ function positionSpotlightVisual(target,label){
   document.querySelectorAll('.dreamy-pointer-badge').forEach(el=>el.remove());
   const badge=document.createElement('div');
   badge.className='dreamy-pointer-badge';
-  badge.textContent='↓ '+(label||'Look here');
-  const placeAbove=r.top-38>=54;
-  badge.style.left=Math.max(12,Math.min(window.innerWidth-210,Math.round(r.left)))+'px';
-  badge.style.top=Math.round(placeAbove?r.top-36:Math.min(window.innerHeight-34,r.bottom+10))+'px';
+  const placeAbove=r.top-42>=54;
+  badge.textContent=(placeAbove?'↓ ':'↑ ')+(label||'Look here');
+  const bLeft=Math.max(12,Math.min(window.innerWidth-210,Math.round(r.left)));
+  const bTop=Math.round(placeAbove?r.top-36:Math.min(window.innerHeight-34,r.bottom+10));
+  badge.style.left=bLeft+'px';
+  badge.style.top=bTop+'px';
   document.body.appendChild(badge);
+  const dock=document.querySelector('.tour-dock');
+  if(dock){
+    const dw=dock.offsetWidth||368,dh=dock.offsetHeight||190,vw=window.innerWidth,vh=window.innerHeight;
+    const br=badge.getBoundingClientRect();
+    const guard=[{l:r.left-12,r:r.right+12,t:r.top-12,b:r.bottom+12},{l:br.left-8,r:br.right+8,t:br.top-8,b:br.bottom+8}];
+    const hits=(x,y)=>guard.some(g=>x<g.r&&x+dw>g.l&&y<g.b&&y+dh>g.t);
+    const spots=[
+      {left:'20px',top:'auto',right:'auto',bottom:'20px',x:20,y:vh-20-dh},
+      {left:'auto',top:'auto',right:'20px',bottom:'78px',x:vw-20-dw,y:vh-78-dh},
+      {left:'auto',top:'68px',right:'20px',bottom:'auto',x:vw-20-dw,y:68},
+      {left:'20px',top:'68px',right:'auto',bottom:'auto',x:20,y:68}
+    ];
+    const chosen=spots.find(s=>!hits(s.x,s.y))||spots[1];
+    dock.style.left=chosen.left;dock.style.top=chosen.top;dock.style.right=chosen.right;dock.style.bottom=chosen.bottom;
+  }
 }
 function repositionSpotlight(){
   if(!spotlightSelector){const sh=document.getElementById('tourSpotlightHost');if(sh)sh.innerHTML='';return;}
@@ -2622,8 +3209,7 @@ function applyDreamyHighlight(movePet=false){
   const target=findFirstVisible(sel);
   if(!target)return;
   spotlightSelector=sel;spotlightLabel=label;
-  target.scrollIntoView({behavior:'auto',block:'nearest',inline:'nearest'});
-  if(tourState.active&&tourState.step===0)window.scrollTo({top:0,behavior:'auto'});
+  target.scrollIntoView({behavior:'auto',block:'center',inline:'nearest'});
   target.classList.add('dreamy-spotlight');
   positionSpotlightVisual(target,label);
   const r=target.getBoundingClientRect();
@@ -2664,6 +3250,7 @@ function getRoleTour(overridePov=''){
   const co=coObj?.profile?.name||'Tiong Woon Corporation';
   const shortCo=co.split(' ')[0]+' '+co.split(' ')[1];
   const fl=companyLoans(coObj?.id).find(x=>!isDisclosed(x))||companyLoans(coObj?.id)[0];
+  if(isTiongWoonRcf(fl))return twcRcfTour(k,fl);
   const dc=ensureDrawdownCase(fl,coObj);
   const dd=fl&&coObj?computeDrawdownDecision(fl,coObj):{datedExtraCost:126000,pfDscr:1.50};
   const ff=(coObj?.financials||[]).at(-1)||{},f0=(coObj?.financials||[])[0]||{};
@@ -2765,6 +3352,32 @@ function localDreamyBrain(raw){
   else if(/\bsembcorp|\bsci\b/i.test(q)){DB.customerId=DB.companies.find(x=>/sembcorp/i.test(x.id+x.profile.name))?.id||DB.customerId;activeLoanId=(companyLoans(DB.customerId).find(x=>!isDisclosed(x))||companyLoans(DB.customerId)[0])?.id||activeLoanId;hydrate();persist();}
   else if(/\bcomfort|\bcdg\b/i.test(q)){DB.customerId=DB.companies.find(x=>/comfort/i.test(x.id+x.profile.name))?.id||DB.customerId;activeLoanId=(companyLoans(DB.customerId).find(x=>!isDisclosed(x))||companyLoans(DB.customerId)[0])?.id||activeLoanId;hydrate();persist();}
   const ac=companyById(DB.customerId)||c,al=companyLoans(ac.id).find(x=>!isDisclosed(x))||companyLoans(ac.id)[0],af=ac.financials?.at(-1)||{};
+  if(isTiongWoonRcf(al)){
+    if(/\b(3 pitch|pitch feature|best|shark tank|ai feature|drawdown|cert|tranche|innovat|judge|receivable|base|assign)\b/i.test(q)){
+      return{
+        answer:`For <strong>${E(ac.profile.name)}</strong> (<strong>${E(al.id)}</strong> — S$3m Secured Receivables RCF):<ul><li><strong>1) Borrowing Base (75%):</strong> S$4.0m certified invoices support a S$3.0m limit. Click <strong>Simulate prior assignment</strong> to exclude AR-SGD-02 and see the S$750k excess.</li><li><strong>2) Map → FX Timing:</strong> Apply the +20d delay on RC-USD-01 (USD 300k) to see AP-USD-01 exposure jump USD 100k → USD 400k.</li><li><strong>3) Cash Stress &amp; Steel Clause:</strong> Confirm CNY 100k → CNY 102,500 (+10% USD steel) and verify whether existing cash covers the gap.</li></ul>`,
+        targetSelector:'[data-action="twcRcfAssignment"], #twcBorrowingBase',
+        targetLabel:'Open Drawdown Check',
+        teleport:'tranches'
+      };
+    }
+    if(/\b(fx|currency|hedge|forward|swap|treasury|rate|steel|clause|delay|receipt)\b/i.test(q)){
+      return{
+        answer:`Open <strong>FX Hedge</strong> on <strong>${E(al.id)}</strong> to see the 0–30 / 31–60 / 61–90d maturity table (USD 400k net payable before FX-USD-01), toggle the +20d receipt delay on <strong>RC-USD-01</strong> independently of FX shocks, and test the 25% USD steel pricing clause on <strong>AP-CNY-01</strong> with human review.`,
+        targetSelector:'[data-action="twcRcfDelay"], #twcEventFx',
+        targetLabel:'Open FX Hedge',
+        teleport:'fx'
+      };
+    }
+    if(/\b(sora|interest|cash|gap|funding|stress|limit|headroom)\b/i.test(q)){
+      return{
+        answer:`Open <strong>Cash Stress</strong> on <strong>${E(al.id)}</strong> to adjust allocated project cash and existing facility headroom against dated cash flows (indicative pricing: 3M SORA + 1.50% p.a.).`,
+        targetSelector:'#twcRcfCashForm, #twcCashForecast',
+        targetLabel:'Open Cash Stress',
+        teleport:'planner'
+      };
+    }
+  }
   if(/\b(apply|loan|borrow|application|financing|what do i have to do|how to start|draft)\b/i.test(q)){
     return {
       answer:`To apply for a corporate loan for <strong>${E(ac.profile.name)}</strong> in DBS IDEAL:<ul><li><strong>Step 1:</strong> Verify UEN, site details &amp; FY${E(af.year||'2026')} ratios under <em>Company profile</em>.</li><li><strong>Step 2:</strong> As <strong>Finance Maker</strong>, click the highlighted <strong>"Apply for financing" / "New application"</strong> button to enter loan quantum, tenor &amp; project funding.</li><li><strong>Step 3:</strong> Click <strong>Route for CFO Approval</strong>, then sign off with 1-Tap <strong>Digital Token+</strong> (zero password needed).</li></ul>`,
@@ -2990,15 +3603,15 @@ function companyCountryFlags(cid){const c=companyById(cid);if(!c)return[];return
 function networkMetricValues(){const d=networkData(),s=countrySignalStats();return[['Corporate clients',d.companies.length,isAnalyst()?'Within your selected portfolio':'Your company only'],['Declared relationships',d.relationships.length,d.relationships.filter(r=>r.dep.confirmed).length+' sourced or confirmed'],['Countries with signals',[...s.values()].filter(v=>v.signals.length).length,'Public sources · past '+networkWindow+' days'],['Linked facilities',new Set(d.relationships.filter(r=>relationshipSignals(r.company,r.dep).length).flatMap(r=>companyLoans(r.company.id).filter(l=>l.status!=='Draft').map(l=>l.id))).size,'Location or counterparty match · review required']];}
 function selectNetworkCountry(country){networkCountry=canonicalCountry(country);selectedNetworkKey='';const box=document.getElementById('networkDetail');if(box)box.innerHTML=networkDetail();globeController?.redraw();}
 function selectNetworkPoint(key){selectedNetworkKey=key;const row=networkData().relationships.find(r=>r.key===key);networkCountry=row?canonicalCountry(row.dep.country):'';const box=document.getElementById('networkDetail');if(box)box.innerHTML=networkDetail();globeController?.redraw();}
-function countryEvidenceCard(e,extra=''){return `<article class="country-evidence"><div class="row between">${tag(e.priority==='High'?'Priority signal':'News signal',e.priority==='High'?'red':'amber')}<time>${E(e.date)}</time></div><a href="${E(safeURL(e.url))}" target="_blank" rel="noopener noreferrer">${E(e.title)}</a><p>${E(e.source||'Public news')} · ${e.locationMatch?'Country name match':'Counterparty name match'}</p>${extra}</article>`;}
+function countryEvidenceCard(e,extra=''){return `<article class="country-evidence"><div class="row between">${tag(e.priority==='High'?'Priority signal':e.locationMatch?'Country-only match · In review':'News signal',e.priority==='High'?'red':'amber')}<time>${E(e.date)}</time></div><a href="${E(safeURL(e.url))}" target="_blank" rel="noopener noreferrer">${E(e.title)}</a><p>${E(e.source||'Public news')} · ${e.locationMatch?'Country name match (unconfirmed against invoices/cash)':'Counterparty name match'}</p>${extra}</article>`;}
 function networkDetail(){
  const back='<button class="linkbtn network-back" data-action="networkReset">← Country watch</button>';
  const d=networkData(),row=d.relationships.find(r=>r.key===selectedNetworkKey),borrower=selectedNetworkKey.startsWith('company|')?d.companies.find(c=>c.id===selectedNetworkKey.slice(8)):null;
- if(row){const p=companyPoint(row.dep),signals=relationshipSignals(row.company,row.dep);return back+`<div class="detail-kicker">${E(row.dep.kind)} relationship</div><h2>${E(row.dep.name)}</h2><p>${E(row.company.profile.name)}</p><div class="detail-values"><div><span>Dependency</span><strong>${E(row.dep.item)}</strong></div><div><span>Concentration</span><strong>${E(relationshipShare(row.dep))}</strong></div><div><span>Operating site</span><strong>${E(row.dep.site)}</strong></div><div><span>Location</span><strong>${E(row.dep.country)}${p?' · '+p[1].toFixed(4)+', '+p[0].toFixed(4):' · Coordinates required'}</strong></div></div>${tag(row.dep.locationPrecision||'Approximate country location','neutral')}<div class="row detail-actions">${button('Edit relationship','networkEdit:'+row.company.id+'|'+row.dep.id)}${button('Review facilities','networkReview:'+row.company.id)}</div>${sourceLink(row.dep.url,'Relationship disclosure ↗')}<h3>${signals.length} related source signals</h3>${signals.slice(0,4).map(e=>countryEvidenceCard(e)).join('')||'<p class="small muted">No sourced signals recorded in this time window. This is not a low-risk assessment.</p>'}`;}
+ if(row){const p=companyPoint(row.dep),signals=relationshipSignals(row.company,row.dep);return back+`<div class="detail-kicker">${E(row.dep.kind)} relationship</div><h2>${E(row.dep.name)}</h2><p>${E(row.company.profile.name)}</p><div class="detail-values"><div><span>Dependency</span><strong>${E(row.dep.item)}</strong></div><div><span>Concentration</span><strong>${E(relationshipShare(row.dep))}</strong></div><div><span>Operating site</span><strong>${E(row.dep.site)}</strong></div><div><span>Location</span><strong>${E(row.dep.country)}${p?' · '+p[1].toFixed(4)+', '+p[0].toFixed(4):' · Coordinates required'}</strong></div></div>${tag(row.dep.locationPrecision||'Approximate country location','neutral')}<div class="row detail-actions">${button('Edit relationship','networkEdit:'+row.company.id+'|'+row.dep.id)}${button('Review facilities','networkReview:'+row.company.id)}</div>${sourceLink(row.dep.url,'Relationship disclosure ↗')}${twcRcfMapLink(row)}<h3>${signals.length} related source signals</h3>${signals.slice(0,4).map(e=>countryEvidenceCard(e)).join('')||'<p class="small muted">No sourced signals recorded in this time window. This is not a low-risk assessment.</p>'}`;}
  if(borrower){return back+`<div class="detail-kicker">Borrower</div><h2>${E(borrower.profile.name)}</h2><p>${E(borrower.profile.industry)} · ${E(borrower.profile.country)}</p><div class="detail-values"><div><span>Declared relationships</span><strong>${borrower.deps.length}</strong></div><div><span>Facilities</span><strong>${companyLoans(borrower.id).filter(l=>!isAnalyst()||l.status!=='Draft').length}</strong></div></div>${button('Open facilities','networkReview:'+borrower.id,true)}`;}
- if(networkCountry){const stat=countrySignalStats().get(networkCountry),rows=d.relationships.filter(r=>canonicalCountry(r.dep.country)===networkCountry),evidence=stat?.signals||[],loans=[...new Map(rows.flatMap(r=>companyLoans(r.company.id).filter(l=>!isAnalyst()||l.status!=='Draft').map(l=>[l.id,l]))).values()];return back+`<div class="detail-kicker">Country exposure</div><h2>${E(networkCountry)}</h2><div class="detail-values"><div><span>Located relationships</span><strong>${rows.length}</strong></div><div><span>Recent source signals</span><strong>${evidence.length}</strong></div></div><p class="small muted">A country match flags a review. Confirm the affected site, product and timing before treating it as borrower impact.</p>${rows.map(r=>`<button class="network-row" data-action="networkFocus:${E(r.key)}"><strong>${E(r.dep.name)}</strong><span>${E(r.company.profile.name)} · ${E(relationshipShare(r.dep))}</span></button>`).join('')}<h3>Potentially linked facilities</h3>${loans.map(l=>`<button class="network-row" data-action="openCase:${E(l.id)}"><strong>${E(l.title)}</strong><span>${E(companyById(l.companyId).profile.name)} · ${E(l.id)}</span></button>`).join('')||'<p class="small muted">No declared portfolio relationships in this country.</p>'}<h3>Source evidence</h3>${evidence.slice(0,6).map(e=>countryEvidenceCard(e,isAnalyst()&&e.locationMatch?button('Dismiss signal','dismissCountry:'+e.id):'')).join('')||'<p class="small muted">No recent sourced signals recorded.</p>'}`;}
+ if(networkCountry){const stat=countrySignalStats().get(networkCountry),rows=d.relationships.filter(r=>canonicalCountry(r.dep.country)===networkCountry),evidence=stat?.signals||[],loans=[...new Map(rows.flatMap(r=>companyLoans(r.company.id).filter(l=>!isAnalyst()||l.status!=='Draft').map(l=>[l.id,l]))).values()];return back+`<div class="detail-kicker">Country exposure</div><h2>${E(networkCountry)}</h2><div class="detail-values"><div><span>Located relationships</span><strong>${rows.length}</strong></div><div><span>Recent source signals</span><strong>${evidence.length}</strong></div></div><p class="small muted">Country-only matches remain in review and do not automatically alter FX hedging or cash forecasts until linked to a confirmed counterparty flow.</p>${rows.map(r=>`<button class="network-row" data-action="networkFocus:${E(r.key)}"><strong>${E(r.dep.name)}</strong><span>${E(r.company.profile.name)} · ${E(relationshipShare(r.dep))}</span></button>`).join('')}${twcRcfMapWatchExtras(networkCountry)}<h3>Potentially linked facilities</h3>${loans.map(l=>`<button class="network-row" data-action="openCase:${E(l.id)}"><strong>${E(l.title)}</strong><span>${E(companyById(l.companyId).profile.name)} · ${E(l.id)}</span></button>`).join('')||'<p class="small muted">No declared portfolio relationships in this country.</p>'}<h3>Country-only signals (in review)</h3>${evidence.slice(0,6).map(e=>countryEvidenceCard(e,isAnalyst()&&e.locationMatch?button('Dismiss signal','dismissCountry:'+e.id):'')).join('')||'<p class="small muted">No recent sourced signals recorded.</p>'}`;}
  const ranked=[...countrySignalStats().values()].filter(s=>s.signals.length).sort((a,b)=>Number(b.high)-Number(a.high)||b.signals.length-a.signals.length);
- return `<div class="detail-kicker">Exposure intelligence</div><h2>${isAnalyst()?'Country watch':'Your business network'}</h2><p class="small muted">Select a country or company on the map to trace the relationship, public evidence and linked facilities.</p>${ranked.slice(0,8).map(s=>`<button class="country-watch-row" data-action="networkCountry:${E(s.country)}"><span class="country-swatch ${s.high?'hot':'warm'}"></span><div><strong>${E(s.country)}</strong><small>${s.relationships.length} relationships · ${s.signals.length} source signals</small></div><span>↗</span></button>`).join('')||'<div class="network-empty"><strong>No source signals recorded yet</strong><p>Scan public news to populate the country watch. Country colours follow recorded evidence.</p></div>'}<div class="coverage-note"><strong>Monitoring coverage</strong><p>${(DB.countryCoverage||[]).length} countries scanned · last scan ${E(stamp(DB.countryScanAt))}</p><p>Grey means no recorded signal or no scan. Colours show news intensity, not a sovereign credit rating.</p></div>`;
+ return `<div class="detail-kicker">Exposure intelligence</div><h2>${isAnalyst()?'Country watch':'Your business network'}</h2><p class="small muted">Select a country or company on the map to inspect transaction-linked FX events and country-only review signals.</p>${twcRcfMapWatchExtras('')}${ranked.length?'<h3>Country signals by market</h3>':''}${ranked.slice(0,8).map(s=>`<button class="country-watch-row" data-action="networkCountry:${E(s.country)}"><span class="country-swatch ${s.high?'hot':'warm'}"></span><div><strong>${E(s.country)}</strong><small>${s.relationships.length} relationships · ${s.signals.length} signals (in review)</small></div><span>↗</span></button>`).join('')||'<div class="network-empty"><strong>No source signals recorded yet</strong><p>Scan public news to populate the country watch. Country colours follow recorded evidence.</p></div>'}<div class="coverage-note"><strong>Monitoring coverage</strong><p>${(DB.countryCoverage||[]).length} countries scanned · last scan ${E(stamp(DB.countryScanAt))}</p><p>Grey means no recorded signal or no scan. Colours show news intensity, not a sovereign credit rating.</p></div>`;
 }
 function networkPage(){
  if(!isAnalyst())networkCompanyId=DB.customerId;
@@ -3014,7 +3627,8 @@ function networkEditor(){const all=isAnalyst()?DB.companies:[companyById(DB.cust
 function watchedCountries(){const footprint=networkData().relationships.map(r=>canonicalCountry(r.dep.country));return [...new Set([...footprint,...(isAnalyst()?(DB.countryWatchlist||['Singapore','Malaysia','China','United States','Germany','Australia','United Kingdom','Japan','India','Ukraine','Russia','Israel','Iran','United Arab Emirates']):[])])].filter(c=>c&&c.length<90).slice(0,32);}
 function localCountryFeed(countries){
  const curated=[
-  {country:'Singapore',title:'[Illustrative Commissioning Notice] 15 Pandan Crescent Yard: Cranes CRN-TW-08..10 MOM AE load-test witness delayed ~3 wks',url:'https://www.tiongwoon.com',excerpt:'Yard Commissioning Notice #EPC-PSA-2026-1118 (18 Nov 2026): Boom-hoist hydraulic calibration & MOM Authorised Examiner witness delayed for 3 cranes; 7 of 10 certified.',date:'2026-11-18',source:'XCMG / Tiong Woon Yard Notice (Illustrative)',priority:'High'},
+  {country:'Singapore',title:'Tiong Woon announces ongoing and new multi-sector projects above S$40m (Feb 2026)',url:TWC_RCF_PROJECT_SOURCE,excerpt:'February 2026 announcement covering semiconductor, public infrastructure and biopharmaceutical integrated heavy-lift projects; individual billing schedules require verification.',date:'2026-02-24',source:'Tiong Woon Media Release',priority:'Review'},
+  {country:'Malaysia',title:'Malaysia industrial transport & customs clearance advisory (Country-only match)',url:TWC_RCF_PROJECT_SOURCE,excerpt:'Country-level logistics watch for Malaysia. Kept in review state separately from transaction-linked receipt RC-USD-01.',date:daysAgo(2),source:'Regional Logistics Watch (Illustrative)',priority:'Review'},
   {country:'Singapore',title:'Changi T5 civil works & Jurong Island turnarounds boost heavy-lift crane utilisation as Tiong Woon FY2026 profit climbs 24%',url:'https://www.tiongwoon.com/investor-relations/annual-reports/',excerpt:'FY2026 revenue grew 15% YoY to S$187.7M and operating cash flow reached S$67.5M; management targets S$200M annual revenue by FY2030.',date:'2026-09-25',source:'Tiong Woon Annual Report / SGX',priority:'Review'},
   {country:'Germany',title:'Liebherr Ehingen heavy LTM mobile crane export schedules & EUR/SGD supply-chain watch',url:'https://www.liebherr.com',excerpt:'High-tonnage all-terrain mobile cranes bound for Singapore waterfront jetty operations remain within contractual lead times.',date:daysAgo(4),source:'Liebherr / Heavy-Lift OEM Monitor',priority:'Review'},
   {country:'Saudi Arabia',title:'TWC Arabia expands Jubail petrochemical heavy-lift & refinery maintenance operations',url:'https://www.tiongwoon.com',excerpt:'100% foreign-owned Saudi heavy-lift subsidiary captures Vision 2030 industrial contracts; cross-border SAR/SGD working capital monitored.',date:daysAgo(4),source:'Tiong Woon Saudi Operations Update',priority:'Review'},
@@ -3248,7 +3862,7 @@ async function fetchLiveCounterpartySignals(deps,existing){
   }));
   return live;
 }
-async function scanCompany(cid,quiet=false){if(scanBusyId)return;const c=companyById(cid),deps=c.deps.filter(d=>d.confirmed);if(!deps.length){if(!quiet)toast('Confirm a public counterparty name in the company profile first.');return;}scanBusyId=cid;c.monitor.lastAttempt=new Date().toISOString();if(!quiet)render();try{let added=0;for(let start=0;start<deps.length;start+=8){const r=await publicAPI('monitor',{counterparties:deps.slice(start,start+8).map(d=>({id:d.id,name:d.name,alias:d.alias,country:d.country,dependency:d.item,kind:d.kind}))});if(!Array.isArray(r.events))throw Error('Invalid monitoring response.');for(const item of r.events){const d=deps.find(d=>d.id===item.counterpartyId);if(!d||!safeURL(item.url)||!item.title||c.events.some(e=>e.url===item.url&&e.dep===d.id))continue;c.events.unshift({id:id(),dep:d.id,title:String(item.title).slice(0,400),text:String(item.excerpt||'').slice(0,3000),date:item.date||today(),source:String(item.source||'Public news'),url:safeURL(item.url),type:['Supplier disruption','Customer payment delay','Cost increase','Corporate action','General development'].includes(item.type)?item.type:'General development',status:'New',priority:item.priority==='High'?'High':'Review',engine:item.engine==='AI'?'AI':'Keyword triage',aiConfidence:item.confidence||'Medium',aiExplanation:String(item.explanation||'').slice(0,3000),missing:String(item.missing||'Confirm original evidence and borrower exposure.').slice(0,1500),confirmedWeeks:finite(item.durationWeeks)?item.durationWeeks:null,note:''});added++;}c.monitor.warning=r.warning||'';}c.events=c.events.slice(0,500);c.monitor.lastRun=new Date().toISOString();c.monitor.error='';c.monitor.count=added;if(!quiet)toast(added+' new counterparty signals recorded.');}catch(e){DB.connection.detail=e.message;const liveRows=await fetchLiveCounterpartySignals(deps,c.events);const fallback=localCounterpartyFeed(deps,[...c.events,...liveRows]);for(const item of [...liveRows,...fallback].reverse())c.events.unshift(item);const tot=liveRows.length+fallback.length;c.events=c.events.slice(0,500);c.monitor.lastRun=new Date().toISOString();c.monitor.error='';c.monitor.warning=liveRows.length?'Live Wikipedia/News API + Local AI Co-Pilot active.':'Local AI Co-Pilot & curated public feed active.';c.monitor.count=tot;audit('Scanned '+deps.length+' confirmed counterparties for '+c.profile.name+' ('+tot+' signals)');if(!quiet)toast(tot?tot+' counterparty signals loaded (incl. '+liveRows.length+' live web hits).':'Counterparties rechecked (no duplicate signals).');}finally{scanBusyId='';hydrate();persist();renderPreservingInputs();}}
+async function scanCompany(cid,quiet=false){if(scanBusyId)return;const c=companyById(cid),deps=c.deps.filter(d=>d.confirmed&&!d.rcfDemo);if(!deps.length){if(!quiet)toast('Confirm a public counterparty name in the company profile first.');return;}scanBusyId=cid;c.monitor.lastAttempt=new Date().toISOString();if(!quiet)render();try{let added=0;for(let start=0;start<deps.length;start+=8){const r=await publicAPI('monitor',{counterparties:deps.slice(start,start+8).map(d=>({id:d.id,name:d.name,alias:d.alias,country:d.country,dependency:d.item,kind:d.kind}))});if(!Array.isArray(r.events))throw Error('Invalid monitoring response.');for(const item of r.events){const d=deps.find(d=>d.id===item.counterpartyId);if(!d||!safeURL(item.url)||!item.title||c.events.some(e=>e.url===item.url&&e.dep===d.id))continue;c.events.unshift({id:id(),dep:d.id,title:String(item.title).slice(0,400),text:String(item.excerpt||'').slice(0,3000),date:item.date||today(),source:String(item.source||'Public news'),url:safeURL(item.url),type:['Supplier disruption','Customer payment delay','Cost increase','Corporate action','General development'].includes(item.type)?item.type:'General development',status:'New',priority:item.priority==='High'?'High':'Review',engine:item.engine==='AI'?'AI':'Keyword triage',aiConfidence:item.confidence||'Medium',aiExplanation:String(item.explanation||'').slice(0,3000),missing:String(item.missing||'Confirm original evidence and borrower exposure.').slice(0,1500),confirmedWeeks:finite(item.durationWeeks)?item.durationWeeks:null,note:''});added++;}c.monitor.warning=r.warning||'';}c.events=c.events.slice(0,500);c.monitor.lastRun=new Date().toISOString();c.monitor.error='';c.monitor.count=added;if(!quiet)toast(added+' new counterparty signals recorded.');}catch(e){DB.connection.detail=e.message;const liveRows=await fetchLiveCounterpartySignals(deps,c.events);const fallback=localCounterpartyFeed(deps,[...c.events,...liveRows]);for(const item of [...liveRows,...fallback].reverse())c.events.unshift(item);const tot=liveRows.length+fallback.length;c.events=c.events.slice(0,500);c.monitor.lastRun=new Date().toISOString();c.monitor.error='';c.monitor.warning=liveRows.length?'Live Wikipedia/News API + Local AI Co-Pilot active.':'Local AI Co-Pilot & curated public feed active.';c.monitor.count=tot;audit('Scanned '+deps.length+' confirmed counterparties for '+c.profile.name+' ('+tot+' signals)');if(!quiet)toast(tot?tot+' counterparty signals loaded (incl. '+liveRows.length+' live web hits).':'Counterparties rechecked (no duplicate signals).');}finally{scanBusyId='';hydrate();persist();renderPreservingInputs();}}
 async function scanNews(){flush();await scanCompany(activeCompany().id);}
 async function scanPortfolio(quiet=false){const ids=DB.companies.filter(c=>c.deps.some(d=>d.confirmed)).map(c=>c.id);for(const cid of ids)await scanCompany(cid,true);if(!quiet)toast('Portfolio scan finished. Open the inbox to review available results.');renderPreservingInputs();}
 function startMonitoring(){clearInterval(monitorTimer);monitorTimer=null;if(DB.monitorEnabled){monitorTimer=setInterval(()=>{if(document.visibilityState!=='visible'||scanBusyId)return;if(isAnalyst())scanPortfolio(true).then(()=>scanCountries(true));else scanCompany(DB.customerId,true).then(()=>scanCountries(true));},600000);}}
@@ -3341,6 +3955,34 @@ async function lookupLiveCompany(){
 }
 function saveApplicationData(form,data){const l=activeLoan(),numbers=['project','contingency','workingCapital','equityFunding','availableFacility','requested'];for(const k of numbers){const v=Number(data[k]||0);if(!finite(v)||v<0||v>1e12)throw Error('Enter a valid non-negative amount.');data[k]=v;}const years=Number(data.years);if(!finite(years)||years<1||years>15||l.terms.grace>=years*12)throw Error('Enter a valid tenor longer than the grace period.');if(!PRODUCTS.includes(data.product))throw Error('Choose a facility structure.');l.title=String(data.title||'New financing application').slice(0,150);Object.assign(S.company,pick({...S.company,...data},APP_KEYS),{facilityConfirmed:form.elements.namedItem('facilityConfirmed').checked,currency:'SGD'});S.terms={...l.terms,years,product:data.product};l.updatedAt=new Date().toISOString();}
 document.addEventListener('submit',async event=>{const f=event.target;if(f.id==='dreamyForm'){event.preventDefault();const inp=document.getElementById('dreamyInput'),q=(inp?.value||'').trim();if(q){if(inp)inp.value='';await askDreamy(q);}return;}if(!f.id&&!f.classList.contains('eventNote'))return;event.preventDefault();if(f.id!=='applicationV3'&&!f.reportValidity())return;try{let d=formData(f);switch(f.id){
+ case'twcRcfClauseForm':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan)||!f.reportValidity())break;
+  await scanTwcRcfClause(loan,d.clauseText);
+  break;
+ }
+ case'twcRcfDrawForm':
+ case'twcRcfCashForm':
+ case'twcRcfFxForm':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan)||!f.reportValidity())break;
+  const candidate=twcRcfState(loan);
+  if(f.id==='twcRcfDrawForm')candidate.outstanding=Number(d.outstanding);
+  if(f.id==='twcRcfCashForm'){
+   candidate.availableCash=Number(d.availableCash);
+   candidate.existingHeadroom=Number(d.existingHeadroom);
+   candidate.sora=Number(d.sora);
+  }
+  if(f.id==='twcRcfFxForm'){
+   candidate.fxCurrency=String(d.fxCurrency);
+   candidate.fxShock=Number(d.fxShock);
+   candidate.steelShock=Number(d.steelShock);
+  }
+  loan.rcfDemo=twcRcfState({rcfDemo:candidate});
+  loan.terms.rate=loan.rcfDemo.sora+TWC_RCF_SPREAD;
+  changed('Updated illustrative scenario for '+loan.id);
+  break;
+ }
  case'profileV3':{const c=companyById(profileId),lat=d.lat.trim(),lon=d.lon.trim();if((lat==='')!==(lon===''))throw Error('Enter both coordinates or leave both blank.');c.profile={...d,lat:lat===''?(COUNTRY_POINTS[d.country]?.[0]??null):Number(lat),lon:lon===''?(COUNTRY_POINTS[d.country]?.[1]??null):Number(lon),locationPrecision:lat===''?'Country centre':'Declared site'};c.updatedAt=new Date().toISOString();hydrate();changed('Updated company profile');break;}
  case'applicationV3':{if(!isCustomerMaker())throw Error('Only Finance Maker can edit or prepare draft applications.');if(!['Draft','Information requested','Pending CFO approval'].includes(activeLoan().status))throw Error('This submitted application is currently being assessed.');if(!f.reportValidity())return;saveApplicationData(f,d);if(event.submitter?.value==='route')routeForCfoApproval();else if(event.submitter?.value==='submit')submitActive();else changed('Saved draft application '+activeLoanId);break;}
  case'financialV2':{const fi=Math.min(finIndex,S.financials.length-1),row=financialFromForm(d);if(S.financials.some((x,i)=>i!==fi&&x.year===row.year))throw Error('Reporting years must be unique.');const previous=S.financials[fi];row.refs={...previous.refs};row.basis={...previous.basis};row.currency='SGD';if(row.source===previous.source)row.sourceURL=previous.sourceURL;for(const k of Object.keys(FIELDS))if(row[k]!==previous[k]||row.year!==previous.year){delete row.basis[k];if(row[k]===null)delete row.refs[k];else row.refs[k]='Reviewed entry · '+row.source;}S.financials[fi]=row;sortedFinancials();finIndex=S.financials.findIndex(x=>x.year===row.year);S.confirmed=false;if(finite(latest().cash)){for(const l of companyLoans(activeCompany().id)){if(!finite(l.scenario.openingCash))l.scenario={...l.scenario,openingCash:latest().cash};if(l.planning&&!finite(l.planning.scenario.openingCash))l.planning.scenario={...l.planning.scenario,openingCash:latest().cash};}if(!finite(S.scenario.openingCash))S.scenario={...S.scenario,openingCash:latest().cash};}changed('Updated company financials '+row.year);break;}
@@ -3503,7 +4145,55 @@ document.addEventListener('click',async event=>{const b=event.target.closest('[d
    });
    break;
  }
- case'openCovenants':selectLoan(v,'review');reviewTab='covenants';render();break;
+ case'twcRcfAssignment':
+ case'twcRcfDelay':
+ case'twcRcfClause':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan))break;
+  const state=twcRcfState(loan);
+  const key={twcRcfAssignment:'priorAssignment',twcRcfDelay:'receiptDelay',twcRcfClause:'clauseReviewed'}[a];
+  if(key==='clauseReviewed'&&!twcRcfPricingLink(state.clauseText))break;
+  state[key]=!state[key];
+  loan.rcfDemo=state;
+  const label={priorAssignment:'prior invoice assignment',receiptDelay:'USD receipt delay',clauseReviewed:'pricing clause confirmation'}[key];
+  changed((state[key]?'Applied ':'Cleared ')+label+' in '+loan.id+' demo');
+  break;
+ }
+ case'twcRcfResetClause':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan))break;
+  const state=twcRcfState(loan);
+  state.clauseText=TWC_RCF_PRICING.clause;
+  state.clauseReviewed=false;
+  state.clauseScan=null;
+  loan.rcfDemo=state;
+  changed('Restored 25% steel pricing clause (pending review) in '+loan.id);
+  break;
+ }
+ case'twcRcfQuickFx':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan))break;
+  const state=twcRcfState(loan);
+  state.fxShock=Number(v)||0;
+  loan.rcfDemo=state;
+  changed('Applied '+(state.fxShock>0?'+':'')+state.fxShock+'% '+state.fxCurrency+' FX shock in '+loan.id);
+  break;
+ }
+ case'twcRcfAssessEvent':{
+  const loan=activeLoan();
+  if(!isTiongWoonRcf(loan))break;
+  await assessTwcRcfEvent(loan);
+  break;
+ }
+ case'twcRcfMapFx':{
+  const [loanId,invoice]=parts;
+  const loan=loanById(loanId),flow=TWC_RCF_FLOWS.find(row=>row.id===invoice);
+  if(!isTiongWoonRcf(loan)||!flow||(!isAnalyst()&&loan.companyId!==DB.customerId))break;
+  loan.rcfDemo={...twcRcfState(loan),fxCurrency:flow.ccy,focusInvoice:flow.id};
+  selectLoan(loan.id,'fx');
+  break;
+ }
+ case'openCovenants':{const tgt=loanById(v);if(isTiongWoonRcf(tgt)){selectLoan(v,'tranches');break;}selectLoan(v,'review');reviewTab='covenants';render();break;}
  case'openSignal':{const [lid,eid]=parts;selectLoan(lid,'review');reviewTab='monitoring';render();document.querySelector(`[data-action="useEvent:${CSS.escape(eid)}"]`)?.closest('article')?.scrollIntoView({behavior:'smooth',block:'center'});break;}
  case'caseTab':flush();caseTab=v;page='case';hydrate();render();break;
  case'reviewTab':flush();caseTab='review';reviewTab=v;page='case';hydrate();render();break;
